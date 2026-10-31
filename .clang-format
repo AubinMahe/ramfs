@@ -1,0 +1,7 @@
+BasedOnStyle: LLVM
+InsertBraces: true
+IndentWidth: 3
+KeepEmptyLinesAtTheStartOfBlocks: false
+MaxEmptyLinesToKeep: 1
+SeparateDefinitionBlocks: Always
+ColumnLimit: 132

@@ -1,0 +1,29 @@
+{
+   "version": "0.2.0",
+   "configurations": [
+      {
+         "name": "ramfile/benchmark",
+         "type": "cppdbg",
+         "request": "launch",
+         "program": "${workspaceFolder}/build_linux/benchmark",
+         "args": [],
+         "stopAtEntry": false,
+         "cwd": "${workspaceFolder}",
+         "environment": [],
+         "externalConsole": false,
+         "MIMode": "gdb",
+         "setupCommands": [
+             {
+                 "description": "Activer l'impression en mode Pretty pour gdb",
+                 "text": "-enable-pretty-printing",
+                 "ignoreFailures": true
+             },
+             {
+                 "description": "Définir la version désassemblage sur Intel",
+                 "text": "-gdb-set disassembly-flavor intel",
+                 "ignoreFailures": true
+             }
+         ]
+      }
+   ]
+}
