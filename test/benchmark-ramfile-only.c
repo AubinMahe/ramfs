@@ -71,6 +71,7 @@ void run_scenario() {
 
 #ifdef _WIN32
 #include <windows.h>
+
 static double now_seconds(void) {
    LARGE_INTEGER freq, cnt;
    QueryPerformanceFrequency(&freq);

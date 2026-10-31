@@ -9,6 +9,13 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC target("sse4.2")
+#endif
+#include <smmintrin.h>
+#endif
+
 #ifdef _WIN32
 #include <direct.h>
 #define mkdir_portable(path) _mkdir(path)
@@ -103,12 +110,27 @@ void rf_destroy(void) {
 }
 
 static size_t hash_path(const char *s) {
+#if defined(__x86_64__) || defined(_M_X64)
+   uint64_t crc = 0xFFFFFFFF;
+   size_t len = strlen(s);
+   size_t chunks = len / 8;
+   for (size_t i = 0; i < chunks; i++) {
+      uint64_t v;
+      memcpy(&v, s + i * 8, sizeof(v));
+      crc = _mm_crc32_u64(crc, v);
+   }
+   for (size_t i = chunks * 8; i < len; i++) {
+      crc = _mm_crc32_u8((uint32_t)crc, (unsigned char)s[i]);
+   }
+   return (size_t)crc;
+#else
    uint64_t h = 1469598103934665603ULL;
    for (; *s; s++) {
       h ^= (unsigned char)*s;
       h *= 1099511628211ULL;
    }
    return (size_t)h;
+#endif
 }
 
 static ram_catalog_t *search_in_catalog(const char *path, size_t hash) {
