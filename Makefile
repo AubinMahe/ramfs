@@ -16,10 +16,11 @@ SRC_LIB     := src/ramfile.c
 HDR         := inc/ramfile.h
 TESTS       := test/main.c test/test_macros.c
 BENCH       := test/benchmark.c
+BENCH_RAM   := test/benchmark-ramfile-only.c
 EXTRA       ?=
 MEASURES    ?=
 WARN        := -std=c11 -Wall -Wextra -pedantic $(if $(WERROR),-Werror) $(EXTRA)
-CFLAGS      := $(WARN) $(BUILD_FLAGS) -I inc -D_GNU_SOURCE -D_POSIX_C_SOURCE=200809L $(if $(MEASURES),-DMEASURES=$(MEASURES))
+CFLAGS      := $(WARN) $(BUILD_FLAGS) -I inc -D_POSIX_C_SOURCE=200809L $(if $(MEASURES),-DMEASURES=$(MEASURES))
 CPPFLAGS    := -DBUILDING_RAMFILE_DLL
 BUILD_LINUX := build_linux$(SUFFIX)
 BUILD_WIN   := build_win$(SUFFIX)
@@ -126,5 +127,15 @@ perf: $(B_PERF)/benchmark
 callgrind: $(B_PERF)/benchmark
 	valgrind --tool=callgrind --callgrind-out-file=$(B_PERF)/callgrind.out ./$<
 	callgrind_annotate $(B_PERF)/callgrind.out | head -40
+
+$(B_PERF)/benchmark-ramfile-only: $(SRC_LIB) $(BENCH_RAM) $(HDR)
+	@mkdir -p $(@D)
+	$(CC_LINUX) $(QA_CFLAGS) $(if $(MEASURES),-DMEASURES=$(MEASURES)) \
+	   -O2 -DNDEBUG -g -fno-omit-frame-pointer -o $@ $(BENCH_RAM) $(SRC_LIB)
+
+perf-ramfile-only: $(B_PERF)/benchmark-ramfile-only
+	perf stat -e task-clock,page-faults,context-switches ./$<
+	perf record -F 2999 --call-graph fp -o $(B_PERF)/perf.data -- ./$<
+	perf report -i $(B_PERF)/perf.data --stdio --no-children --percent-limit 2 | head -70
 
 -include $(wildcard $(addsuffix /*.d,$(ALL_DIRS)))
