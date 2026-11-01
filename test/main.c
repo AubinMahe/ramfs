@@ -18,6 +18,19 @@
 
 #include "ramfile.h"
 
+#ifndef F_OK
+#define F_OK 0
+#endif
+#ifndef X_OK
+#define X_OK 1
+#endif
+#ifndef W_OK
+#define W_OK 2
+#endif
+#ifndef R_OK
+#define R_OK 4
+#endif
+
 int test_macros(void); /* test_macros.c : test de la redirection par macros */
 
 static int g_checks = 0;
@@ -352,6 +365,13 @@ static void test_foreign_streams(void) {
    CHECK_FAIL(rf_fprintf(stderr, "x"), -1, EBADF);
    CHECK(rf_fread(buf, 1, sizeof(buf), stdin) == 0);
    CHECK(rf_fwrite("x", 1, 1, stdout) == 0);
+   CHECK(rf_fgetc(stdin) == EOF);
+   CHECK(rf_fgets(buf, sizeof(buf), stdin) == NULL);
+   CHECK(rf_fputc('x', stdout) == EOF);
+   CHECK(rf_fputs("x", stdout) == EOF);
+   CHECK(rf_feof(stdin) == 0);
+   CHECK(rf_ferror(stdin) == 0);
+   CHECK(rf_fflush(stdout) == 0);
    CHECK_FAIL(rf_fseek(stdout, 0, SEEK_SET), -1, EBADF);
    CHECK_FAIL(rf_ftell(stdout), -1, EBADF);
 #if UINTPTR_MAX > 0xFFFFFFFFu
@@ -393,6 +413,231 @@ static void test_fscanf(void) {
    rf_destroy();
 }
 
+static void test_stdio_extended(void) {
+   char line[64];
+   rf_init(4, 4);
+
+   /* 1. Écriture avec fputs et fputc */
+   FILE *f = rf_fopen("text.txt", "w");
+   CHECK(f != NULL);
+   CHECK(rf_fputs("Ligne 1\n", f) >= 0);
+   CHECK(rf_fputc('A', f) == 'A');
+   CHECK(rf_fputc('\n', f) == '\n');
+   CHECK(rf_fputs("Ligne 3 sans newline", f) >= 0);
+   CHECK(rf_fflush(f) == 0);
+   CHECK(rf_fclose(f) == 0);
+
+   /* 2. Lecture avec fgets */
+   f = rf_fopen("text.txt", "r");
+   CHECK(f != NULL);
+   CHECK(rf_feof(f) == 0);
+   CHECK(rf_ferror(f) == 0);
+
+   char *p = rf_fgets(line, sizeof(line), f);
+   CHECK(p == line && strcmp(line, "Ligne 1\n") == 0);
+   CHECK(rf_feof(f) == 0);
+
+   p = rf_fgets(line, sizeof(line), f);
+   CHECK(p == line && strcmp(line, "A\n") == 0);
+   CHECK(rf_feof(f) == 0);
+
+   p = rf_fgets(line, sizeof(line), f);
+   CHECK(p == line && strcmp(line, "Ligne 3 sans newline") == 0);
+   CHECK(rf_feof(f) == 0);
+
+   p = rf_fgets(line, sizeof(line), f);
+   CHECK(p == NULL);
+   CHECK(rf_feof(f) != 0);
+
+   /* 3. rewind & fgetc */
+   rf_rewind(f);
+   CHECK(rf_feof(f) == 0);
+   CHECK(rf_ftell(f) == 0);
+
+   int c = rf_fgetc(f);
+   CHECK(c == 'L');
+   c = rf_fgetc(f);
+   CHECK(c == 'i');
+
+   /* clearerr */
+   rf_clearerr(f);
+   CHECK(rf_feof(f) == 0);
+   CHECK(rf_ferror(f) == 0);
+
+   CHECK(rf_fclose(f) == 0);
+
+   /* 4. rf_remove */
+   CHECK(rf_remove("text.txt") == 0);
+   CHECK(rf_fopen("text.txt", "r") == NULL);
+
+   /* 5. Cas d'erreurs et arguments invalides */
+   CHECK(rf_fgets(line, 0, f) == NULL && errno == EINVAL);
+   CHECK(rf_fgets(NULL, 10, f) == NULL && errno == EINVAL);
+   CHECK(rf_fputs(NULL, f) == EOF && errno == EINVAL);
+   CHECK(rf_fflush(NULL) == 0);
+
+   rf_destroy();
+}
+
+static void test_stat_and_fstat(void) {
+   struct stat st;
+   rf_init(4, 2);
+
+   /* 1. Fichier inexistant et arguments invalides */
+   CHECK_FAIL(rf_stat("missing.dat", &st), -1, ENOENT);
+   CHECK_FAIL(rf_stat(NULL, &st), -1, EINVAL);
+   CHECK_FAIL(rf_stat("missing.dat", NULL), -1, EINVAL);
+   CHECK_FAIL(rf_fstat(RF_INVALID_HANDLE, &st), -1, EBADF);
+   CHECK_FAIL(rf_fstat(0, NULL), -1, EINVAL);
+
+   /* 2. Création et écriture */
+   int fd = rf_open("stat_test.dat", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+   CHECK(fd >= 0);
+   CHECK(rf_write(fd, "1234567890", 10) == 10);
+
+   /* 3. fstat sur descripteur ouvert */
+   memset(&st, 0, sizeof(st));
+   CHECK(rf_fstat(fd, &st) == 0);
+   CHECK(st.st_size == 10);
+   CHECK((st.st_mode & S_IFMT) == S_IFREG);
+   CHECK(st.st_nlink == 1);
+   CHECK(st.st_mtime != 0);
+
+   /* 4. stat par chemin pendant que le fichier est ouvert */
+   memset(&st, 0, sizeof(st));
+   CHECK(rf_stat("stat_test.dat", &st) == 0);
+   CHECK(st.st_size == 10);
+   CHECK((st.st_mode & S_IFMT) == S_IFREG);
+
+   /* 5. stat après fermeture */
+   CHECK(rf_close(fd) == 0);
+   CHECK_FAIL(rf_fstat(fd, &st), -1, EBADF);
+   memset(&st, 0, sizeof(st));
+   CHECK(rf_stat("stat_test.dat", &st) == 0);
+   CHECK(st.st_size == 10);
+
+   /* 6. stat après suppression */
+   CHECK(rf_unlink("stat_test.dat") == 0);
+   CHECK_FAIL(rf_stat("stat_test.dat", &st), -1, ENOENT);
+
+   rf_destroy();
+
+   /* 7. Hors initialisation */
+   CHECK_FAIL(rf_stat("stat_test.dat", &st), -1, ENODEV);
+   CHECK_FAIL(rf_fstat(0, &st), -1, ENODEV);
+}
+
+static void test_path_normalization(void) {
+   char out[128];
+   char buf[32];
+   struct stat st;
+
+   /* 1. Validation unitaire de rf_normalize_path */
+   CHECK(rf_normalize_path("donnees.dat", out, sizeof(out)) == 0 && strcmp(out, "donnees.dat") == 0);
+   CHECK(rf_normalize_path("./donnees.dat", out, sizeof(out)) == 0 && strcmp(out, "donnees.dat") == 0);
+   CHECK(rf_normalize_path("././donnees.dat", out, sizeof(out)) == 0 && strcmp(out, "donnees.dat") == 0);
+   CHECK(rf_normalize_path("dir//sub/./f.dat", out, sizeof(out)) == 0 && strcmp(out, "dir/sub/f.dat") == 0);
+   CHECK(rf_normalize_path("dir\\sub\\f.dat", out, sizeof(out)) == 0 && strcmp(out, "dir/sub/f.dat") == 0);
+   CHECK(rf_normalize_path(".\\a\\b.dat", out, sizeof(out)) == 0 && strcmp(out, "a/b.dat") == 0);
+   CHECK(rf_normalize_path("///a/b///c/", out, sizeof(out)) == 0 && strcmp(out, "/a/b/c") == 0);
+   CHECK(rf_normalize_path("a/b/../c", out, sizeof(out)) == 0 && strcmp(out, "a/c") == 0);
+   CHECK(rf_normalize_path("a/b/..", out, sizeof(out)) == 0 && strcmp(out, "a") == 0);
+   CHECK(rf_normalize_path("c:\\dir\\file.txt", out, sizeof(out)) == 0 && strcmp(out, "C:/dir/file.txt") == 0);
+   CHECK(rf_normalize_path(".", out, sizeof(out)) == 0 && strcmp(out, ".") == 0);
+   CHECK(rf_normalize_path("/", out, sizeof(out)) == 0 && strcmp(out, "/") == 0);
+
+   /* Arguments invalides & tampons trop courts */
+   CHECK_FAIL(rf_normalize_path(NULL, out, sizeof(out)), -1, EINVAL);
+   CHECK_FAIL(rf_normalize_path("a", NULL, 10), -1, EINVAL);
+   CHECK_FAIL(rf_normalize_path("a/b/c", out, 3), -1, ENAMETOOLONG);
+
+   /* 2. Intégration dans ramfile : résolution transparente de syntaxes variées */
+   rf_init(4, 4);
+
+   /* Création sous chemin avec préfixe "./" */
+   int fd = rf_open("./dir/sub/f.dat", O_CREAT | O_WRONLY | O_TRUNC, 0644);
+   CHECK(fd >= 0);
+   CHECK(rf_write(fd, "NORMALIZED", 10) == 10);
+   CHECK(rf_close(fd) == 0);
+
+   /* Relecture via double slash et antislash */
+   fd = rf_open("dir//sub\\f.dat", O_RDONLY);
+   CHECK(fd >= 0);
+   memset(buf, 0, sizeof(buf));
+   CHECK(rf_read(fd, buf, sizeof(buf)) == 10);
+   CHECK(strcmp(buf, "NORMALIZED") == 0);
+   CHECK(rf_close(fd) == 0);
+
+   /* Relecture via chemin avec composant relatif ".." */
+   fd = rf_open("dir/sub/../sub/f.dat", O_RDONLY);
+   CHECK(fd >= 0);
+   CHECK(rf_close(fd) == 0);
+
+   /* Sondage stat avec antislash Windows */
+   memset(&st, 0, sizeof(st));
+   CHECK(rf_stat(".\\dir\\sub/f.dat", &st) == 0);
+   CHECK(st.st_size == 10);
+
+   /* Suppression avec chemin normalisé différemment */
+   CHECK(rf_unlink("dir/./sub//f.dat") == 0);
+   CHECK_FAIL(rf_open("./dir/sub/f.dat", O_RDONLY), -1, ENOENT);
+
+   rf_destroy();
+}
+
+static void test_stats(void) {
+   rf_stats_t st;
+
+   /* 1. Avant initialisation */
+   CHECK_FAIL(rf_get_stats(&st), -1, ENODEV);
+   CHECK_FAIL(rf_get_stats(NULL), -1, EINVAL);
+
+   /* 2. Après initialisation */
+   rf_init(10, 5);
+   CHECK(rf_get_stats(&st) == 0);
+   CHECK(st.files_used == 0 && st.peak_files == 0 && st.files_capacity == 10);
+   CHECK(st.access_used == 0 && st.peak_access == 0 && st.access_capacity == 5);
+
+   /* 3. Création et ouverture de 3 fichiers */
+   int fd1 = rf_open("a.dat", O_CREAT | O_RDWR, 0644);
+   int fd2 = rf_open("b.dat", O_CREAT | O_RDWR, 0644);
+   int fd3 = rf_open("c.dat", O_CREAT | O_RDWR, 0644);
+   CHECK(fd1 >= 0 && fd2 >= 0 && fd3 >= 0);
+
+   CHECK(rf_get_stats(&st) == 0);
+   CHECK(st.files_used == 3 && st.peak_files == 3);
+   CHECK(st.access_used == 3 && st.peak_access == 3);
+
+   /* 4. Fermeture de descripteurs : l'actuel baisse, le pic reste */
+   CHECK(rf_close(fd1) == 0);
+   CHECK(rf_close(fd2) == 0);
+   CHECK(rf_get_stats(&st) == 0);
+   CHECK(st.access_used == 1);
+   CHECK(st.peak_access == 3);
+
+   /* 5. Suppression de fichier : l'actuel baisse, le pic reste */
+   CHECK(rf_unlink("a.dat") == 0);
+   CHECK(rf_get_stats(&st) == 0);
+   CHECK(st.files_used == 2);
+   CHECK(st.peak_files == 3);
+
+   /* 6. Ouverture d'un nouveau fichier */
+   int fd4 = rf_open("d.dat", O_CREAT | O_RDWR, 0644);
+   CHECK(fd4 >= 0);
+   CHECK(rf_get_stats(&st) == 0);
+   CHECK(st.files_used == 3 && st.peak_files == 3);
+   CHECK(st.access_used == 2 && st.peak_access == 3);
+
+   CHECK(rf_close(fd3) == 0);
+   CHECK(rf_close(fd4) == 0);
+
+   /* 7. Affichage synthétique sans crash */
+   rf_dump_stats(NULL);
+
+   rf_destroy();
+   CHECK_FAIL(rf_get_stats(&st), -1, ENODEV);
+}
+
 static int read_real(const char *path, char *buf, size_t cap) {
    FILE *f = fopen(path, "rb");
    if (!f) {
@@ -403,24 +648,210 @@ static int read_real(const char *path, char *buf, size_t cap) {
    return (int)n;
 }
 
-static void test_flush_to_disk(void) {
+static void test_save_load_disk(void) {
    char buf[16];
    struct stat st;
-   rf_init(4, 2);
+   rf_init(8, 4);
    CHECK(put("dir/sub/a.dat", "AAA"));
    CHECK(put("b.dat", "BBBB"));
-   CHECK_FAIL(rf_flush_to_disk(NULL), -1, EINVAL);
-   CHECK(rf_flush_to_disk("test-out") == 0);
 
+   /* Sauvegarde totale sur disque dans test-out */
+   CHECK(rf_save(NULL, 0, NULL, "test-out") == 0);
    CHECK(read_real("test-out/dir/sub/a.dat", buf, sizeof(buf)) == 3 && memcmp(buf, "AAA", 3) == 0);
    CHECK(read_real("test-out/b.dat", buf, sizeof(buf)) == 4 && memcmp(buf, "BBBB", 4) == 0);
 
+   /* Sauvegarde sélective sur disque dans test-out-sel */
+   const char *only_b[] = {"b.dat"};
+   CHECK(rf_save(only_b, 1, NULL, "test-out-sel") == 0);
+   CHECK(read_real("test-out-sel/b.dat", buf, sizeof(buf)) == 4 && memcmp(buf, "BBBB", 4) == 0);
+   CHECK(stat("test-out-sel/dir/sub/a.dat", &st) != 0);
+
+   /* Erreur si chemin inexistant */
+   const char *missing[] = {"absent.dat"};
+   CHECK_FAIL(rf_save(missing, 1, NULL, "test-out"), -1, ENOENT);
+
+   /* Chargement depuis le disque */
+   rf_destroy();
+   rf_init(8, 4);
+   CHECK(rf_load(NULL, "test-out", NULL) == 2);
+   CHECK(has_content("dir/sub/a.dat", "AAA"));
+   CHECK(has_content("b.dat", "BBBB"));
+
+   /* Chargement avec préfixe */
+   CHECK(rf_load(NULL, "test-out", "imported") == 2);
+   CHECK(has_content("imported/dir/sub/a.dat", "AAA"));
+   CHECK(has_content("imported/b.dat", "BBBB"));
+
+   /* Nettoyage des répertoires réels */
    remove("test-out/dir/sub/a.dat");
    remove("test-out/b.dat");
    RMDIR("test-out/dir/sub");
    RMDIR("test-out/dir");
    RMDIR("test-out");
-   CHECK(stat("test-out", &st) != 0); /* nettoyage effectif */
+   remove("test-out-sel/b.dat");
+   RMDIR("test-out-sel");
+
+   rf_destroy();
+}
+
+static void test_save_load_archive(void) {
+   rf_init(8, 4);
+   CHECK(put("alpha.txt", "Alpha content 12345"));
+   CHECK(put("folder/nested.bin", "Binary Nested Data"));
+
+   /* Sauvegarde totale dans une archive .tar.gz */
+   CHECK(rf_save(NULL, 0, "test_archive.tar.gz", NULL) == 0);
+
+   /* Sauvegarde sélective dans une autre archive */
+   const char *only_alpha[] = {"alpha.txt"};
+   CHECK(rf_save(only_alpha, 1, "test_sel.tar.gz", NULL) == 0);
+
+   /* Réinitialisation de la mémoire ramfile */
+   rf_destroy();
+   rf_init(8, 4);
+
+   /* Chargement complet de l'archive */
+   CHECK(rf_load("test_archive.tar.gz", NULL, NULL) == 2);
+   CHECK(has_content("alpha.txt", "Alpha content 12345"));
+   CHECK(has_content("folder/nested.bin", "Binary Nested Data"));
+
+   /* Chargement avec préfixe */
+   CHECK(rf_load("test_sel.tar.gz", NULL, "restored") == 1);
+   CHECK(has_content("restored/alpha.txt", "Alpha content 12345"));
+
+   /* Archive inexistante */
+   CHECK_FAIL(rf_load("archive_qui_n_existe_pas.tar.gz", NULL, NULL), -1, ENOENT);
+
+   /* Nettoyage des archives sur disque */
+   remove("test_archive.tar.gz");
+   remove("test_sel.tar.gz");
+
+   rf_destroy();
+}
+
+static void test_flex_and_index_layer(void) {
+   char buf[64];
+   rf_init(8, 4);
+
+   /* 1. Tests fileno & isatty */
+   FILE *f = rf_fopen("source.sql", "w+");
+   CHECK(f != NULL);
+   int fd = rf_fileno(f);
+   CHECK(fd >= 0);
+   /* Un flux ramfile n'est jamais un tty : isatty doit renvoyer 0 avec errno == ENOTTY */
+   errno = 0;
+   CHECK(rf_isatty(fd) == 0 && errno == ENOTTY);
+
+   /* fileno sur flux standard : délégation à libc fileno */
+   CHECK(rf_fileno(stdin) == 0);
+   CHECK(rf_fileno(stdout) == 1);
+   CHECK(rf_fileno(stderr) == 2);
+
+   /* fileno sur pointeur invalide ou NULL */
+   CHECK_FAIL(rf_fileno(NULL), -1, EBADF);
+   CHECK_FAIL(rf_fileno((FILE *)0xDEADBEEF), -1, EBADF);
+
+   /* 2. Tests ungetc pour lexer / tokenizer (Flex) */
+   CHECK(rf_fputs("SELECT *", f) >= 0);
+   rf_rewind(f);
+
+   /* Lecture caractère par caractère avec refoulement ungetc */
+   int c = rf_fgetc(f);
+   CHECK(c == 'S');
+   CHECK(rf_ungetc('S', f) == 'S');
+   CHECK(rf_fgetc(f) == 'S');
+   c = rf_fgetc(f);
+   CHECK(c == 'E');
+
+   /* Modification de caractère via ungetc */
+   CHECK(rf_ungetc('X', f) == 'X');
+   CHECK(rf_fgetc(f) == 'X');
+   c = rf_fgetc(f);
+   CHECK(c == 'L');
+
+   /* Lecture jusqu'à la fin */
+   memset(buf, 0, sizeof(buf));
+   CHECK(rf_fgets(buf, sizeof(buf), f) != NULL);
+   CHECK(strcmp(buf, "ECT *") == 0);
+   CHECK(rf_fgetc(f) == EOF);
+   CHECK(rf_feof(f) != 0);
+
+   /* ungetc après EOF doit effacer l'indicateur EOF */
+   CHECK(rf_ungetc('!', f) == '!');
+   CHECK(rf_feof(f) == 0);
+   CHECK(rf_fgetc(f) == '!');
+   CHECK(rf_fgetc(f) == EOF);
+   CHECK(rf_feof(f) != 0);
+
+   /* ungetc d'un EOF n'a aucun effet */
+   CHECK(rf_ungetc(EOF, f) == EOF);
+
+   /* ungetc au début du fichier (offset 0) doit échouer */
+   rf_rewind(f);
+   CHECK(rf_ungetc('Z', f) == EOF);
+
+   CHECK(rf_fclose(f) == 0);
+
+   /* 3. Tests rename pour génération atomique d'index (.tmp -> .idx) */
+   CHECK(put("table.tmp", "INDEX_HEADER_DATA_12345"));
+   CHECK(rf_rename("table.tmp", "table.idx") == 0);
+
+   /* L'ancien nom ne doit plus exister */
+   CHECK_FAIL(rf_open("table.tmp", O_RDONLY), -1, ENOENT);
+   /* Le nouveau fichier doit avoir le contenu intact */
+   CHECK(has_content("table.idx", "INDEX_HEADER_DATA_12345"));
+
+   /* Renommage avec normalisation de chemin */
+   CHECK(rf_rename("./table.idx", "sub/../table_final.idx") == 0);
+   CHECK(has_content("table_final.idx", "INDEX_HEADER_DATA_12345"));
+
+   /* Écrasement atomique d'un fichier existant */
+   CHECK(put("target.idx", "OLD_INDEX"));
+   CHECK(put("source.tmp", "NEW_INDEX"));
+   CHECK(rf_rename("source.tmp", "target.idx") == 0);
+   CHECK_FAIL(rf_open("source.tmp", O_RDONLY), -1, ENOENT);
+   CHECK(has_content("target.idx", "NEW_INDEX"));
+
+   /* Renommage vers soi-même */
+   CHECK(rf_rename("target.idx", "./target.idx") == 0);
+   CHECK_FAIL(rf_rename("inexistant.tmp", "inexistant.tmp"), -1, ENOENT);
+
+   /* Renommage échoue si la cible est actuellement ouverte (EBUSY) */
+   CHECK(put("locked.idx", "LOCKED_DATA"));
+   CHECK(put("update.tmp", "NEW_DATA"));
+   int locked_fd = rf_open("locked.idx", O_RDONLY);
+   CHECK(locked_fd >= 0);
+   CHECK_FAIL(rf_rename("update.tmp", "locked.idx"), -1, EBUSY);
+   CHECK(rf_close(locked_fd) == 0);
+   /* Une fois fermée, le renommage réussit */
+   CHECK(rf_rename("update.tmp", "locked.idx") == 0);
+   CHECK(has_content("locked.idx", "NEW_DATA"));
+
+   /* Renommage pendant que la source est ouverte : les accès ouverts restent valides */
+   int open_src = rf_open("locked.idx", O_RDONLY);
+   CHECK(open_src >= 0);
+   CHECK(rf_rename("locked.idx", "locked_moved.idx") == 0);
+   memset(buf, 0, sizeof(buf));
+   CHECK(rf_read(open_src, buf, 8) == 8);
+   CHECK(memcmp(buf, "NEW_DATA", 8) == 0);
+   CHECK(rf_close(open_src) == 0);
+   CHECK(has_content("locked_moved.idx", "NEW_DATA"));
+
+   /* 4. Tests access (vérification existence et droits) */
+   CHECK(rf_access("locked_moved.idx", F_OK) == 0);
+   CHECK(rf_access("locked_moved.idx", R_OK) == 0);
+   CHECK(rf_access("locked_moved.idx", W_OK) == 0);
+   CHECK(rf_access("locked_moved.idx", R_OK | W_OK) == 0);
+   /* ramfile ne gère pas de fichiers exécutables */
+   CHECK_FAIL(rf_access("locked_moved.idx", X_OK), -1, EACCES);
+
+   /* Normalisation dans access */
+   CHECK(rf_access("./locked_moved.idx", F_OK) == 0);
+
+   /* Fichier inexistant et arguments invalides */
+   CHECK_FAIL(rf_access("fichier_inconnu.sql", F_OK), -1, ENOENT);
+   CHECK_FAIL(rf_access(NULL, F_OK), -1, EINVAL);
+
    rf_destroy();
 }
 
@@ -435,7 +866,13 @@ int main(void) {
    RUN(test_stdio_layer);
    RUN(test_foreign_streams);
    RUN(test_fscanf);
-   RUN(test_flush_to_disk);
+   RUN(test_stdio_extended);
+   RUN(test_stat_and_fstat);
+   RUN(test_path_normalization);
+   RUN(test_stats);
+   RUN(test_save_load_disk);
+   RUN(test_save_load_archive);
+   RUN(test_flex_and_index_layer);
    {
       int before = g_failures;
       CHECK(test_macros() == 0);
