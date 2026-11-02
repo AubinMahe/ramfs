@@ -10,9 +10,6 @@
 #define RAMFS_API __attribute__((visibility("default")))
 #endif
 
-/* Rétro-compatibilité pour l'ancien nom de macro d'export */
-#define RAMFILE_API RAMFS_API
-
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -22,10 +19,6 @@
 typedef int rfs_handle_t;
 #define RFS_INVALID_HANDLE (-1)
 
-/* Alias rétro-compatibles */
-typedef rfs_handle_t rf_handle_t;
-#define RF_INVALID_HANDLE RFS_INVALID_HANDLE
-
 typedef struct {
    unsigned files_used;      /* Nombre actuel de fichiers en mémoire */
    unsigned peak_files;      /* Pic maximal de fichiers simultanés */
@@ -34,8 +27,6 @@ typedef struct {
    unsigned peak_access;     /* Pic maximal de descripteurs simultanés */
    unsigned access_capacity; /* Capacité configurée lors de rfs_init */
 } rfs_stats_t;
-
-typedef rfs_stats_t rf_stats_t;
 
 /**
  * Initialise les structures de données de ramfs à partir des limites fournies.
@@ -134,51 +125,7 @@ RAMFS_API int rfs_load(const char *archive_path, const char *src_dir, const char
  */
 RAMFS_API int rfs_load_dir(const char *dir_path, const char *prefix);
 
-/* Alias rétro-compatibles pour l'API C */
-#define rf_init rfs_init
-#define rf_destroy rfs_destroy
-#define rf_get_stats rfs_get_stats
-#define rf_dump_stats rfs_dump_stats
-#define rf_open rfs_open
-#define rf_read rfs_read
-#define rf_write rfs_write
-#define rf_lseek rfs_lseek
-#define rf_close rfs_close
-#define rf_unlink rfs_unlink
-#define rf_remove rfs_remove
-#define rf_stat rfs_stat
-#define rf_fstat rfs_fstat
-#define rf_rename rfs_rename
-#define rf_access rfs_access
-#define rf_mkdir rfs_mkdir
-#define rf_rmdir rfs_rmdir
-#define rf_isatty rfs_isatty
-#define rf_normalize_path rfs_normalize_path
-#define rf_fopen rfs_fopen
-#define rf_fread rfs_fread
-#define rf_fwrite rfs_fwrite
-#define rf_fseek rfs_fseek
-#define rf_ftell rfs_ftell
-#define rf_rewind rfs_rewind
-#define rf_fflush rfs_fflush
-#define rf_feof rfs_feof
-#define rf_ferror rfs_ferror
-#define rf_clearerr rfs_clearerr
-#define rf_fileno rfs_fileno
-#define rf_fgetc rfs_fgetc
-#define rf_ungetc rfs_ungetc
-#define rf_fgets rfs_fgets
-#define rf_fputc rfs_fputc
-#define rf_fputs rfs_fputs
-#define rf_fprintf rfs_fprintf
-#define rf_vfprintf rfs_vfprintf
-#define rf_fscanf rfs_fscanf
-#define rf_fclose rfs_fclose
-#define rf_save rfs_save
-#define rf_load rfs_load
-#define rf_load_dir rfs_load_dir
-
-#if defined(USE_RAMFS) || defined(USE_RAMFILE)
+#ifdef USE_RAMFS
 
 #undef open
 #define open(...) rfs_open(__VA_ARGS__)

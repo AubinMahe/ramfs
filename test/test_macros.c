@@ -1,4 +1,4 @@
-/* Vérifie que, avec USE_RAMFILE, le code "à l'ancienne" (open/read/write/fopen...)
+/* Vérifie que, avec USE_RAMFS, le code "à l'ancienne" (open/read/write/fopen...)
  * est redirigé vers ramfs et ne touche pas au disque.
  * Les en-têtes système doivent être inclus AVANT ramfs.h : les macros
  * remplacent open/read/write/close/... et casseraient leurs prototypes. */
@@ -68,7 +68,7 @@ int test_macros(void) {
 
    /* API de bas niveau */
    int fd = open(FILENAME, O_CREAT | O_RDWR | O_TRUNC, 0644);
-   EXPECT(fd != RF_INVALID_HANDLE);
+   EXPECT(fd != RFS_INVALID_HANDLE);
    EXPECT(write(fd, "hello", 5) == 5);
    EXPECT(lseek(fd, 0, SEEK_SET) == 0);
    memset(buf, 0, sizeof(buf));
@@ -87,7 +87,7 @@ int test_macros(void) {
    errno = 0;
    EXPECT(stat(FILENAME, &st) != 0 && errno == ENOENT);
    errno = 0;
-   EXPECT(open(FILENAME, O_RDONLY) == RF_INVALID_HANDLE && errno == ENOENT);
+   EXPECT(open(FILENAME, O_RDONLY) == RFS_INVALID_HANDLE && errno == ENOENT);
 
    /* API stdio */
    FILE *f = fopen(FILENAME, "w");

@@ -286,7 +286,7 @@ for file in "${FILES[@]}"; do
       if [[ $FILE_COUNT -gt 0 ]]; then
          MATCHED_FILES+=("$file")
          FILE_CALLS["$file"]=$FILE_COUNT
-         if grep -qE "(USE_RAMFS|USE_RAMFILE|ramfs\.h|ramfile\.h)" "$file" 2>/dev/null; then
+         if grep -qE "(USE_RAMFS|ramfs\.h)" "$file" 2>/dev/null; then
             FILE_EQUIPPED["$file"]=1
          else
             FILE_EQUIPPED["$file"]=0
