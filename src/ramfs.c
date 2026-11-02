@@ -1,4 +1,4 @@
-#include "ramfile.h"
+#include "ramfs.h"
 #include <ctype.h>
 #include <dirent.h>
 #include <errno.h>
@@ -30,13 +30,14 @@ typedef intptr_t ssize_t;
 #define mkdir_portable(path) mkdir(path, 0755)
 #endif
 
-#define RAMFILE_INITIAL_CAPACITY 1024
+#define RAMFS_INITIAL_CAPACITY 1024
 #define MIN_TABLE_SIZE 8
 
 typedef struct {
    unsigned char *data;
    size_t size;
    size_t capacity;
+   int is_dir;
 } ram_file_t;
 
 /* Une entrée de la table de hachage. path == NULL signifie "case vide". */
@@ -74,8 +75,8 @@ static unsigned g_peak_files = 0;
 static unsigned g_access_used = 0;
 static unsigned g_peak_access = 0;
 
-int rf_init(unsigned files_count, unsigned access_count) {
-   rf_destroy();
+int rfs_init(unsigned files_count, unsigned access_count) {
+   rfs_destroy();
    size_t table_size = MIN_TABLE_SIZE;
    while (table_size < (size_t)files_count * 2) {
       table_size *= 2; /* facteur de charge <= 0,5 */
@@ -86,7 +87,7 @@ int rf_init(unsigned files_count, unsigned access_count) {
    g_access_table = calloc(access_count ? access_count : 1, sizeof(ram_file_access_t));
    if ((g_files == NULL) || (g_free_stack == NULL) || (g_table == NULL) || (g_access_table == NULL)) {
       errno = ENOMEM;
-      rf_destroy();
+      rfs_destroy();
       return -1;
    }
    g_files_capacity = files_count;
@@ -104,7 +105,7 @@ int rf_init(unsigned files_count, unsigned access_count) {
    return 0;
 }
 
-void rf_destroy(void) {
+void rfs_destroy(void) {
    if (g_table) {
       for (size_t i = 0; i <= g_table_mask; i++) {
          free(g_table[i].path);
@@ -182,7 +183,7 @@ static ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
       return NULL;
    }
    char *path_copy = strdup(path);
-   unsigned char *data = calloc(1, RAMFILE_INITIAL_CAPACITY);
+   unsigned char *data = calloc(1, RAMFS_INITIAL_CAPACITY);
    if (!path_copy || !data) {
       free(path_copy);
       free(data);
@@ -192,7 +193,8 @@ static ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
    ram_file_t *file = g_files + g_free_stack[--g_free_top];
    file->data = data;
    file->size = 0;
-   file->capacity = RAMFILE_INITIAL_CAPACITY;
+   file->capacity = RAMFS_INITIAL_CAPACITY;
+   file->is_dir = 0;
    size_t i = hash & g_table_mask;
    while (g_table[i].path != NULL) {
       i = (i + 1) & g_table_mask;
@@ -205,6 +207,52 @@ static ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
       g_peak_files = g_files_used;
    }
    return g_table + i;
+}
+
+static ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash) {
+   if (g_free_top == 0) {
+      fprintf(stderr, "Capacité du catalogue atteinte !\n");
+      errno = ENOMEM;
+      return NULL;
+   }
+   char *path_copy = strdup(path);
+   if (!path_copy) {
+      errno = ENOMEM;
+      return NULL;
+   }
+   ram_file_t *file = g_files + g_free_stack[--g_free_top];
+   file->data = NULL;
+   file->size = 0;
+   file->capacity = 0;
+   file->is_dir = 1;
+   size_t i = hash & g_table_mask;
+   while (g_table[i].path != NULL) {
+      i = (i + 1) & g_table_mask;
+   }
+   g_table[i].path = path_copy;
+   g_table[i].file = file;
+   g_table[i].hash = hash;
+   g_files_used++;
+   if (g_files_used > g_peak_files) {
+      g_peak_files = g_files_used;
+   }
+   return g_table + i;
+}
+
+static int is_dir_prefix(const char *clean_path) {
+   if (!g_table) {
+      return 0;
+   }
+   size_t len = strlen(clean_path);
+   for (size_t i = 0; i <= g_table_mask; i++) {
+      const ram_catalog_t *e = g_table + i;
+      if (e->path != NULL && e->file != NULL) {
+         if (strncmp(e->path, clean_path, len) == 0 && e->path[len] == '/') {
+            return 1;
+         }
+      }
+   }
+   return 0;
 }
 
 /* Retire l'entrée à l'index i en conservant la validité des chaînes de sondage. */
@@ -227,7 +275,7 @@ static void remove_from_catalog(size_t i) {
 }
 
 /* Renvoie l'accès pour un handle valide et ouvert, sinon NULL (errno = EBADF). */
-static ram_file_access_t *get_access(rf_handle_t fd) {
+static ram_file_access_t *get_access(rfs_handle_t fd) {
    if ((g_files == NULL) || (g_access_table == NULL)) {
       errno = ENODEV;
       return NULL;
@@ -239,7 +287,7 @@ static ram_file_access_t *get_access(rf_handle_t fd) {
    return g_access_table + fd;
 }
 
-int rf_normalize_path(const char *src, char *dst, size_t dst_size) {
+int rfs_normalize_path(const char *src, char *dst, size_t dst_size) {
    if (!src || !dst || dst_size == 0) {
       errno = EINVAL;
       return -1;
@@ -343,18 +391,22 @@ int rf_normalize_path(const char *src, char *dst, size_t dst_size) {
    return 0;
 }
 
-rf_handle_t rf_open(const char *pathname, int flags, ...) {
+rfs_handle_t rfs_open(const char *pathname, int flags, ...) {
    if ((g_files == NULL) || (g_access_table == NULL)) {
       errno = ENODEV;
-      return RF_INVALID_HANDLE;
+      return RFS_INVALID_HANDLE;
    }
    if (!pathname) {
       errno = EINVAL;
-      return RF_INVALID_HANDLE;
+      return RFS_INVALID_HANDLE;
    }
    char clean_path[PATH_MAX];
-   if (rf_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
-      return RF_INVALID_HANDLE;
+   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+      return RFS_INVALID_HANDLE;
+   }
+   if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0) {
+      errno = EISDIR;
+      return RFS_INVALID_HANDLE;
    }
    int access_mode = flags & O_ACCMODE;
    size_t hash = hash_path(clean_path);
@@ -362,39 +414,47 @@ rf_handle_t rf_open(const char *pathname, int flags, ...) {
    ram_file_t *file = NULL;
    if (entry) {
       file = entry->file;
+      if (file->is_dir) {
+         errno = EISDIR;
+         return RFS_INVALID_HANDLE;
+      }
       if ((flags & O_CREAT) && (flags & O_EXCL)) {
          errno = EEXIST;
-         return RF_INVALID_HANDLE;
+         return RFS_INVALID_HANDLE;
       }
    } else {
+      if (is_dir_prefix(clean_path)) {
+         errno = EISDIR;
+         return RFS_INVALID_HANDLE;
+      }
       if (flags & O_CREAT) {
          entry = create_entry_in_catalog(clean_path, hash);
          if (entry == NULL) {
-            return RF_INVALID_HANDLE;
+            return RFS_INVALID_HANDLE;
          }
          file = entry->file;
       } else {
          errno = ENOENT;
-         return RF_INVALID_HANDLE;
+         return RFS_INVALID_HANDLE;
       }
    }
-   rf_handle_t free_slot = RF_INVALID_HANDLE;
+   rfs_handle_t free_slot = RFS_INVALID_HANDLE;
    for (unsigned i = 0; i < g_access_capacity; i++) {
       const ram_file_access_t *access = g_access_table + i;
       if (access->file == file) {
          int active_mode = access->flags & O_ACCMODE;
          if (active_mode != O_RDONLY || access_mode != O_RDONLY) {
             errno = EBUSY;
-            return RF_INVALID_HANDLE;
+            return RFS_INVALID_HANDLE;
          }
-      } else if ((free_slot == RF_INVALID_HANDLE) && (access->file == NULL)) {
-         free_slot = (rf_handle_t)i;
+      } else if ((free_slot == RFS_INVALID_HANDLE) && (access->file == NULL)) {
+         free_slot = (rfs_handle_t)i;
       }
    }
-   if (free_slot == RF_INVALID_HANDLE) {
+   if (free_slot == RFS_INVALID_HANDLE) {
       fprintf(stderr, "Capacité d'accès atteinte !\n");
       errno = ENOMEM;
-      return RF_INVALID_HANDLE;
+      return RFS_INVALID_HANDLE;
    }
    if (flags & O_TRUNC) {
       file->size = 0;
@@ -412,7 +472,7 @@ rf_handle_t rf_open(const char *pathname, int flags, ...) {
    return free_slot;
 }
 
-ssize_t rf_read(rf_handle_t fd, void *buf, size_t count) {
+ssize_t rfs_read(rfs_handle_t fd, void *buf, size_t count) {
    ram_file_access_t *acc = get_access(fd);
    if (!acc || (acc->flags & O_ACCMODE) == O_WRONLY) {
       if (acc) {
@@ -438,7 +498,7 @@ ssize_t rf_read(rf_handle_t fd, void *buf, size_t count) {
    return (ssize_t)to_read;
 }
 
-ssize_t rf_write(rf_handle_t fd, const void *buf, size_t count) {
+ssize_t rfs_write(rfs_handle_t fd, const void *buf, size_t count) {
    ram_file_access_t *acc = get_access(fd);
    if (!acc || (acc->flags & O_ACCMODE) == O_RDONLY) {
       if (acc) {
@@ -453,7 +513,7 @@ ssize_t rf_write(rf_handle_t fd, const void *buf, size_t count) {
    }
    size_t required_size = (size_t)acc->offset + count;
    if (required_size > file->capacity) {
-      size_t new_capacity = file->capacity == 0 ? RAMFILE_INITIAL_CAPACITY : file->capacity * 2;
+      size_t new_capacity = file->capacity == 0 ? RAMFS_INITIAL_CAPACITY : file->capacity * 2;
       while (new_capacity < required_size) {
          new_capacity *= 2;
       }
@@ -478,7 +538,7 @@ ssize_t rf_write(rf_handle_t fd, const void *buf, size_t count) {
    return (ssize_t)count;
 }
 
-off_t rf_lseek(rf_handle_t fd, off_t offset, int whence) {
+off_t rfs_lseek(rfs_handle_t fd, off_t offset, int whence) {
    ram_file_access_t *acc = get_access(fd);
    if (!acc) {
       return -1;
@@ -507,7 +567,7 @@ off_t rf_lseek(rf_handle_t fd, off_t offset, int whence) {
    return acc->offset;
 }
 
-int rf_close(rf_handle_t fd) {
+int rfs_close(rfs_handle_t fd) {
    ram_file_access_t *acc = get_access(fd);
    if (!acc) {
       return -1;
@@ -519,7 +579,7 @@ int rf_close(rf_handle_t fd) {
    return 0;
 }
 
-int rf_unlink(const char *pathname) {
+int rfs_unlink(const char *pathname) {
    if (!pathname) {
       errno = EINVAL;
       return -1;
@@ -529,15 +589,27 @@ int rf_unlink(const char *pathname) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rf_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+      return -1;
+   }
+   if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0) {
+      errno = EISDIR;
       return -1;
    }
    ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
    if (entry == NULL) {
+      if (is_dir_prefix(clean_path)) {
+         errno = EISDIR;
+         return -1;
+      }
       errno = ENOENT;
       return -1;
    }
    ram_file_t *file = entry->file;
+   if (file->is_dir) {
+      errno = EISDIR;
+      return -1;
+   }
    for (unsigned i = 0; i < g_access_capacity; i++) {
       if (g_access_table[i].file == file) {
          errno = EBUSY;
@@ -556,13 +628,37 @@ int rf_unlink(const char *pathname) {
    return 0;
 }
 
-int rf_remove(const char *pathname) { return rf_unlink(pathname); }
+int rfs_remove(const char *pathname) {
+   if (!pathname) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (!g_files || !g_table) {
+      errno = ENODEV;
+      return -1;
+   }
+   char clean_path[PATH_MAX];
+   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+      return -1;
+   }
+   ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
+   if ((entry && entry->file && entry->file->is_dir) || is_dir_prefix(clean_path)) {
+      return rfs_rmdir(pathname);
+   }
+   return rfs_unlink(pathname);
+}
 
 static void fill_stat_buf(const ram_file_t *file, struct stat *buf) {
    memset(buf, 0, sizeof(struct stat));
-   buf->st_mode = S_IFREG | 0644;
-   buf->st_size = (off_t)file->size;
-   buf->st_nlink = 1;
+   if (file && file->is_dir) {
+      buf->st_mode = S_IFDIR | 0755;
+      buf->st_size = 0;
+      buf->st_nlink = 2;
+   } else {
+      buf->st_mode = S_IFREG | 0644;
+      buf->st_size = file ? (off_t)file->size : 0;
+      buf->st_nlink = 1;
+   }
 #if defined(__linux__) || defined(__unix__)
    buf->st_blksize = 4096;
    buf->st_blocks = (buf->st_size + 511) / 512;
@@ -573,7 +669,7 @@ static void fill_stat_buf(const ram_file_t *file, struct stat *buf) {
    buf->st_ctime = now;
 }
 
-int rf_stat(const char *pathname, struct stat *buf) {
+int rfs_stat(const char *pathname, struct stat *buf) {
    if (!pathname || !buf) {
       errno = EINVAL;
       return -1;
@@ -583,19 +679,25 @@ int rf_stat(const char *pathname, struct stat *buf) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rf_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return -1;
    }
    ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
-   if (!entry || !entry->file) {
-      errno = ENOENT;
-      return -1;
+   if (entry && entry->file) {
+      fill_stat_buf(entry->file, buf);
+      return 0;
    }
-   fill_stat_buf(entry->file, buf);
-   return 0;
+   if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0 || is_dir_prefix(clean_path)) {
+      fill_stat_buf(NULL, buf);
+      buf->st_mode = S_IFDIR | 0755;
+      buf->st_nlink = 2;
+      return 0;
+   }
+   errno = ENOENT;
+   return -1;
 }
 
-int rf_fstat(rf_handle_t fd, struct stat *buf) {
+int rfs_fstat(rfs_handle_t fd, struct stat *buf) {
    if (!buf) {
       errno = EINVAL;
       return -1;
@@ -608,7 +710,7 @@ int rf_fstat(rf_handle_t fd, struct stat *buf) {
    return 0;
 }
 
-int rf_rename(const char *oldpath, const char *newpath) {
+int rfs_rename(const char *oldpath, const char *newpath) {
    if (!oldpath || !newpath) {
       errno = EINVAL;
       return -1;
@@ -619,8 +721,8 @@ int rf_rename(const char *oldpath, const char *newpath) {
    }
    char clean_old[PATH_MAX];
    char clean_new[PATH_MAX];
-   if (rf_normalize_path(oldpath, clean_old, sizeof(clean_old)) != 0 ||
-       rf_normalize_path(newpath, clean_new, sizeof(clean_new)) != 0) {
+   if (rfs_normalize_path(oldpath, clean_old, sizeof(clean_old)) != 0 ||
+       rfs_normalize_path(newpath, clean_new, sizeof(clean_new)) != 0) {
       return -1;
    }
    if (strcmp(clean_old, clean_new) == 0) {
@@ -640,6 +742,14 @@ int rf_rename(const char *oldpath, const char *newpath) {
 
    ram_catalog_t *new_entry = search_in_catalog(clean_new, hash_path(clean_new));
    if (new_entry && new_entry->file) {
+      if (new_entry->file->is_dir != old_file->is_dir) {
+         errno = old_file->is_dir ? ENOTDIR : EISDIR;
+         return -1;
+      }
+      if (new_entry->file->is_dir && is_dir_prefix(clean_new)) {
+         errno = ENOTEMPTY;
+         return -1;
+      }
       for (unsigned i = 0; i < g_access_capacity; i++) {
          if (g_access_table[i].file == new_entry->file) {
             errno = EBUSY;
@@ -678,10 +788,39 @@ int rf_rename(const char *oldpath, const char *newpath) {
    g_table[i].path = new_path_copy;
    g_table[i].file = old_file;
    g_table[i].hash = hash;
+
+   if (old_file->is_dir) {
+      size_t old_len = strlen(clean_old);
+      for (size_t idx = 0; idx <= g_table_mask; idx++) {
+         ram_catalog_t *e = g_table + idx;
+         if (e->path != NULL && e->file != NULL && e->file != old_file) {
+            if (strncmp(e->path, clean_old, old_len) == 0 && e->path[old_len] == '/') {
+               char child_new[PATH_MAX];
+               snprintf(child_new, sizeof(child_new), "%s%s", clean_new, e->path + old_len);
+               char *child_copy = strdup(child_new);
+               if (child_copy) {
+                  ram_file_t *cf = e->file;
+                  free(e->path);
+                  remove_from_catalog(idx);
+                  size_t chash = hash_path(child_new);
+                  size_t pos = chash & g_table_mask;
+                  while (g_table[pos].path != NULL) {
+                     pos = (pos + 1) & g_table_mask;
+                  }
+                  g_table[pos].path = child_copy;
+                  g_table[pos].file = cf;
+                  g_table[pos].hash = chash;
+                  idx = (size_t)-1;
+               }
+            }
+         }
+      }
+   }
+
    return 0;
 }
 
-int rf_access(const char *pathname, int mode) {
+int rfs_access(const char *pathname, int mode) {
    if (!pathname) {
       errno = EINVAL;
       return -1;
@@ -691,22 +830,130 @@ int rf_access(const char *pathname, int mode) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rf_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return -1;
    }
    ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
-   if (!entry || !entry->file) {
+   int is_dir = 0;
+   if (entry && entry->file) {
+      is_dir = entry->file->is_dir;
+   } else if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0 || is_dir_prefix(clean_path)) {
+      is_dir = 1;
+   } else {
       errno = ENOENT;
       return -1;
    }
-   if (mode & 1 /* X_OK */) {
+   if (!is_dir && (mode & 1 /* X_OK */)) {
       errno = EACCES;
       return -1;
    }
    return 0;
 }
 
-int rf_isatty(rf_handle_t fd) {
+int rfs_mkdir(const char *pathname, ...) {
+   va_list ap;
+   va_start(ap, pathname);
+   va_end(ap);
+
+   if (!pathname) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (!g_files || !g_table) {
+      errno = ENODEV;
+      return -1;
+   }
+   char clean_path[PATH_MAX];
+   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+      return -1;
+   }
+   if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0) {
+      errno = EEXIST;
+      return -1;
+   }
+   size_t hash = hash_path(clean_path);
+   ram_catalog_t *entry = search_in_catalog(clean_path, hash);
+   if (entry != NULL || is_dir_prefix(clean_path)) {
+      errno = EEXIST;
+      return -1;
+   }
+   const char *last_slash = strrchr(clean_path, '/');
+   if (last_slash) {
+      char parent[PATH_MAX];
+      size_t plen = (size_t)(last_slash - clean_path);
+      if (plen > 0) {
+         memcpy(parent, clean_path, plen);
+         parent[plen] = '\0';
+         ram_catalog_t *pe = search_in_catalog(parent, hash_path(parent));
+         if (pe) {
+            if (!pe->file->is_dir) {
+               errno = ENOTDIR;
+               return -1;
+            }
+         } else if (!is_dir_prefix(parent)) {
+            errno = ENOENT;
+            return -1;
+         }
+      }
+   }
+   if (!create_dir_entry_in_catalog(clean_path, hash)) {
+      return -1;
+   }
+   return 0;
+}
+
+int rfs_rmdir(const char *pathname) {
+   if (!pathname) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (!g_files || !g_table) {
+      errno = ENODEV;
+      return -1;
+   }
+   char clean_path[PATH_MAX];
+   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+      return -1;
+   }
+   if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0) {
+      errno = EBUSY;
+      return -1;
+   }
+   ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
+   if (!entry || !entry->file) {
+      if (is_dir_prefix(clean_path)) {
+         errno = ENOTEMPTY;
+         return -1;
+      }
+      errno = ENOENT;
+      return -1;
+   }
+   if (!entry->file->is_dir) {
+      errno = ENOTDIR;
+      return -1;
+   }
+   size_t len = strlen(clean_path);
+   for (size_t i = 0; i <= g_table_mask; i++) {
+      const ram_catalog_t *e = g_table + i;
+      if (e->path != NULL && e->file != NULL && e != entry) {
+         if (strncmp(e->path, clean_path, len) == 0 && e->path[len] == '/') {
+            errno = ENOTEMPTY;
+            return -1;
+         }
+      }
+   }
+   free(entry->path);
+   unsigned index = (unsigned)(entry->file - g_files);
+   memset(entry->file, 0, sizeof(ram_file_t));
+   g_free_stack[g_free_top++] = index;
+   remove_from_catalog((size_t)(entry - g_table));
+   if (g_files_used > 0) {
+      g_files_used--;
+   }
+   return 0;
+}
+
+int rfs_isatty(rfs_handle_t fd) {
    ram_file_access_t *acc = get_access(fd);
    if (!acc) {
 #undef isatty
@@ -720,7 +967,7 @@ int rf_isatty(rf_handle_t fd) {
    return 0;
 }
 
-int rf_get_stats(rf_stats_t *stats) {
+int rfs_get_stats(rfs_stats_t *stats) {
    if (!stats) {
       errno = EINVAL;
       return -1;
@@ -738,16 +985,16 @@ int rf_get_stats(rf_stats_t *stats) {
    return 0;
 }
 
-void rf_dump_stats(FILE *stream) {
+void rfs_dump_stats(FILE *stream) {
    FILE *out = stream ? stream : stderr;
-   rf_stats_t st;
-   if (rf_get_stats(&st) != 0) {
+   rfs_stats_t st;
+   if (rfs_get_stats(&st) != 0) {
       fprintf(out, "ramfile: non initialisé\n");
       return;
    }
    double files_pct = st.files_capacity ? ((double)st.peak_files * 100.0 / (double)st.files_capacity) : 0.0;
    double access_pct = st.access_capacity ? ((double)st.peak_access * 100.0 / (double)st.access_capacity) : 0.0;
-   fprintf(out, "=== Statistiques ramfile ===\n");
+   fprintf(out, "=== Statistiques ramfs ===\n");
    fprintf(out, "Fichiers : actuel %u, pic %u / %u (%.1f%%)\n", st.files_used, st.peak_files, st.files_capacity, files_pct);
    fprintf(out, "Accès    : actuel %u, pic %u / %u (%.1f%%)\n", st.access_used, st.peak_access, st.access_capacity, access_pct);
    fprintf(out, "============================\n");
@@ -755,27 +1002,27 @@ void rf_dump_stats(FILE *stream) {
 
 #define STDIO_HANDLE_BIAS ((uintptr_t)0xBA5E0000)
 
-static FILE *handle_to_file_ptr(rf_handle_t handle) {
-   if (handle == RF_INVALID_HANDLE) {
+static FILE *handle_to_file_ptr(rfs_handle_t handle) {
+   if (handle == RFS_INVALID_HANDLE) {
       return NULL;
    }
    return (FILE *)(STDIO_HANDLE_BIAS + (uintptr_t)handle);
 }
 
-static rf_handle_t file_ptr_to_handle(FILE *stream) {
+static rfs_handle_t file_ptr_to_handle(FILE *stream) {
    if (!stream) {
-      return RF_INVALID_HANDLE;
+      return RFS_INVALID_HANDLE;
    }
    uintptr_t addr = (uintptr_t)stream;
    /* Seule la plage [BIAS, BIAS + access_count) désigne un faux FILE* de ramfile.
       Tout le reste (stdin, stdout, stderr, vrai FILE*) est rejeté. */
    if (addr < STDIO_HANDLE_BIAS || addr - STDIO_HANDLE_BIAS >= g_access_capacity) {
-      return RF_INVALID_HANDLE;
+      return RFS_INVALID_HANDLE;
    }
-   return (rf_handle_t)(addr - STDIO_HANDLE_BIAS);
+   return (rfs_handle_t)(addr - STDIO_HANDLE_BIAS);
 }
 
-FILE *rf_fopen(const char *pathname, const char *mode) {
+FILE *rfs_fopen(const char *pathname, const char *mode) {
    if (!pathname || !mode) {
       errno = EINVAL;
       return NULL;
@@ -791,41 +1038,41 @@ FILE *rf_fopen(const char *pathname, const char *mode) {
       errno = EINVAL;
       return NULL;
    }
-   rf_handle_t handle = rf_open(pathname, flags, 0644);
+   rfs_handle_t handle = rfs_open(pathname, flags, 0644);
    return handle_to_file_ptr(handle);
 }
 
-size_t rf_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE || size == 0 || nmemb == 0) {
+size_t rfs_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE || size == 0 || nmemb == 0) {
       return 0;
    }
-   ssize_t bytes_read = rf_read(handle, ptr, size * nmemb);
+   ssize_t bytes_read = rfs_read(handle, ptr, size * nmemb);
    if (bytes_read <= 0) {
       return 0;
    }
    return (size_t)bytes_read / size;
 }
 
-size_t rf_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE || size == 0 || nmemb == 0) {
+size_t rfs_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE || size == 0 || nmemb == 0) {
       return 0;
    }
-   ssize_t bytes_written = rf_write(handle, ptr, size * nmemb);
+   ssize_t bytes_written = rfs_write(handle, ptr, size * nmemb);
    if (bytes_written <= 0) {
       return 0;
    }
    return (size_t)bytes_written / size;
 }
 
-int rf_fseek(FILE *stream, long offset, int whence) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+int rfs_fseek(FILE *stream, long offset, int whence) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return -1;
    }
-   off_t res = rf_lseek(handle, (off_t)offset, whence);
+   off_t res = rfs_lseek(handle, (off_t)offset, whence);
    if (res == (off_t)-1) {
       return -1;
    }
@@ -836,19 +1083,19 @@ int rf_fseek(FILE *stream, long offset, int whence) {
    return 0;
 }
 
-long rf_ftell(FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+long rfs_ftell(FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return -1;
    }
-   off_t current_offset = rf_lseek(handle, 0, SEEK_CUR);
+   off_t current_offset = rfs_lseek(handle, 0, SEEK_CUR);
    return (long)current_offset;
 }
 
-void rf_rewind(FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+void rfs_rewind(FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       return;
    }
    ram_file_access_t *acc = get_access(handle);
@@ -859,12 +1106,12 @@ void rf_rewind(FILE *stream) {
    }
 }
 
-int rf_fflush(FILE *stream) {
+int rfs_fflush(FILE *stream) {
    if (!stream) {
       return 0;
    }
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       if (stream == stdout || stream == stderr || stream == stdin) {
 #undef fflush
          return fflush(stream);
@@ -880,27 +1127,27 @@ int rf_fflush(FILE *stream) {
    return 0;
 }
 
-int rf_feof(FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+int rfs_feof(FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       return 0;
    }
    ram_file_access_t *acc = get_access(handle);
    return acc ? acc->eof : 0;
 }
 
-int rf_ferror(FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+int rfs_ferror(FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       return 0;
    }
    ram_file_access_t *acc = get_access(handle);
    return acc ? acc->error : 0;
 }
 
-void rf_clearerr(FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+void rfs_clearerr(FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       return;
    }
    ram_file_access_t *acc = get_access(handle);
@@ -910,13 +1157,13 @@ void rf_clearerr(FILE *stream) {
    }
 }
 
-int rf_fileno(FILE *stream) {
+int rfs_fileno(FILE *stream) {
    if (!stream) {
       errno = EBADF;
       return -1;
    }
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       if (stream == stdin || stream == stdout || stream == stderr) {
 #undef fileno
          return fileno(stream);
@@ -931,12 +1178,12 @@ int rf_fileno(FILE *stream) {
    return (int)handle;
 }
 
-int rf_ungetc(int c, FILE *stream) {
+int rfs_ungetc(int c, FILE *stream) {
    if (c == EOF) {
       return EOF;
    }
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return EOF;
    }
@@ -957,9 +1204,9 @@ int rf_ungetc(int c, FILE *stream) {
    return (int)(unsigned char)c;
 }
 
-int rf_fgetc(FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+int rfs_fgetc(FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return EOF;
    }
@@ -980,13 +1227,13 @@ int rf_fgetc(FILE *stream) {
    return (int)c;
 }
 
-char *rf_fgets(char *s, int size, FILE *stream) {
+char *rfs_fgets(char *s, int size, FILE *stream) {
    if (!s || size <= 0) {
       errno = EINVAL;
       return NULL;
    }
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return NULL;
    }
@@ -1015,14 +1262,14 @@ char *rf_fgets(char *s, int size, FILE *stream) {
    return s;
 }
 
-int rf_fputc(int c, FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+int rfs_fputc(int c, FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return EOF;
    }
    unsigned char uc = (unsigned char)c;
-   ssize_t written = rf_write(handle, &uc, 1);
+   ssize_t written = rfs_write(handle, &uc, 1);
    if (written != 1) {
       ram_file_access_t *acc = get_access(handle);
       if (acc) {
@@ -1033,13 +1280,13 @@ int rf_fputc(int c, FILE *stream) {
    return (int)uc;
 }
 
-int rf_fputs(const char *s, FILE *stream) {
+int rfs_fputs(const char *s, FILE *stream) {
    if (!s) {
       errno = EINVAL;
       return EOF;
    }
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return EOF;
    }
@@ -1047,7 +1294,7 @@ int rf_fputs(const char *s, FILE *stream) {
    if (len == 0) {
       return 0;
    }
-   ssize_t written = rf_write(handle, s, len);
+   ssize_t written = rfs_write(handle, s, len);
    if (written < 0 || (size_t)written != len) {
       ram_file_access_t *acc = get_access(handle);
       if (acc) {
@@ -1058,16 +1305,20 @@ int rf_fputs(const char *s, FILE *stream) {
    return (int)written;
 }
 
-int rf_fprintf(FILE *stream, const char *format, ...) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE || !format) {
+int rfs_vfprintf(FILE *stream, const char *format, va_list ap) {
+   if (!stream || !format) {
+      errno = EINVAL;
+      return -1;
+   }
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return -1;
    }
-   va_list args;
-   va_start(args, format);
-   int len = vsnprintf(NULL, 0, format, args);
-   va_end(args);
+   va_list ap_copy;
+   va_copy(ap_copy, ap);
+   int len = vsnprintf(NULL, 0, format, ap_copy);
+   va_end(ap_copy);
    if (len < 0) {
       return -1;
    }
@@ -1079,17 +1330,25 @@ int rf_fprintf(FILE *stream, const char *format, ...) {
       errno = ENOMEM;
       return -1;
    }
-   va_start(args, format);
-   vsnprintf(buffer, (size_t)len + 1, format, args);
-   va_end(args);
-   ssize_t written = rf_write(handle, buffer, (size_t)len);
+   va_copy(ap_copy, ap);
+   vsnprintf(buffer, (size_t)len + 1, format, ap_copy);
+   va_end(ap_copy);
+   ssize_t written = rfs_write(handle, buffer, (size_t)len);
    free(buffer);
    return (written < 0) ? -1 : (int)written;
 }
 
-int rf_fscanf(FILE *stream, const char *format, ...) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE || !format) {
+int rfs_fprintf(FILE *stream, const char *format, ...) {
+   va_list args;
+   va_start(args, format);
+   int ret = rfs_vfprintf(stream, format, args);
+   va_end(args);
+   return ret;
+}
+
+int rfs_fscanf(FILE *stream, const char *format, ...) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE || !format) {
       errno = EBADF;
       return -1;
    }
@@ -1142,7 +1401,14 @@ int rf_fscanf(FILE *stream, const char *format, ...) {
       suppress_format[j] = '\0';
       strcat(suppress_format, "%n");
       int bytes_consumed = 0;
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wformat-nonliteral"
+#endif
       sscanf(text, suppress_format, &bytes_consumed);
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic pop
+#endif
       if (bytes_consumed > 0) {
          acc->offset += bytes_consumed;
       }
@@ -1152,13 +1418,13 @@ int rf_fscanf(FILE *stream, const char *format, ...) {
    return fields_read;
 }
 
-int rf_fclose(FILE *stream) {
-   rf_handle_t handle = file_ptr_to_handle(stream);
-   if (handle == RF_INVALID_HANDLE) {
+int rfs_fclose(FILE *stream) {
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return -1;
    }
-   return rf_close(handle);
+   return rfs_close(handle);
 }
 
 static void utils_mkdir_p(const char *dir_path) {
@@ -1204,28 +1470,40 @@ struct tar_header {
    char pad[12];
 };
 
-static void make_tar_header(struct tar_header *h, const char *path, size_t size) {
+static void make_tar_header(struct tar_header *h, const char *path, size_t size, int is_dir) {
    memset(h, 0, sizeof(*h));
-   if (strlen(path) > 100) {
-      const char *slash = strrchr(path, '/');
-      if (!slash) {
-         slash = strrchr(path, '\\');
-      }
-      if (slash && (size_t)(slash - path) < sizeof(h->prefix) && strlen(slash + 1) < sizeof(h->name)) {
-         memcpy(h->prefix, path, (size_t)(slash - path));
-         strncpy(h->name, slash + 1, sizeof(h->name) - 1);
+   char formatted_path[PATH_MAX + 1];
+   if (is_dir) {
+      size_t plen = strlen(path);
+      if (plen > 0 && path[plen - 1] != '/') {
+         snprintf(formatted_path, sizeof(formatted_path), "%s/", path);
       } else {
-         strncpy(h->name, path, sizeof(h->name) - 1);
+         snprintf(formatted_path, sizeof(formatted_path), "%s", path);
       }
    } else {
-      strncpy(h->name, path, sizeof(h->name) - 1);
+      snprintf(formatted_path, sizeof(formatted_path), "%s", path);
    }
-   snprintf(h->mode, sizeof(h->mode), "%07o", 0644);
+   const char *target_path = formatted_path;
+   if (strlen(target_path) > 100) {
+      const char *slash = strrchr(target_path, '/');
+      if (!slash) {
+         slash = strrchr(target_path, '\\');
+      }
+      if (slash && (size_t)(slash - target_path) < sizeof(h->prefix) && strlen(slash + 1) < sizeof(h->name)) {
+         memcpy(h->prefix, target_path, (size_t)(slash - target_path));
+         strncpy(h->name, slash + 1, sizeof(h->name) - 1);
+      } else {
+         strncpy(h->name, target_path, sizeof(h->name) - 1);
+      }
+   } else {
+      strncpy(h->name, target_path, sizeof(h->name) - 1);
+   }
+   snprintf(h->mode, sizeof(h->mode), "%07o", is_dir ? 0755 : 0644);
    snprintf(h->uid, sizeof(h->uid), "%07o", 1000);
    snprintf(h->gid, sizeof(h->gid), "%07o", 1000);
-   snprintf(h->size, sizeof(h->size), "%011lo", (unsigned long)size);
+   snprintf(h->size, sizeof(h->size), "%011lo", (unsigned long)(is_dir ? 0 : size));
    snprintf(h->mtime, sizeof(h->mtime), "%011lo", (unsigned long)time(NULL));
-   h->typeflag = '0';
+   h->typeflag = is_dir ? '5' : '0';
    memcpy(h->magic, "ustar ", 6);
    memcpy(h->version, " ", 2);
    strncpy(h->uname, "user", sizeof(h->uname) - 1);
@@ -1240,7 +1518,7 @@ static void make_tar_header(struct tar_header *h, const char *path, size_t size)
    snprintf(h->chksum, sizeof(h->chksum), "%06o", sum);
 }
 
-int rf_save(const char *const *paths, size_t path_count, const char *archive_path, const char *dest_dir) {
+int rfs_save(const char *const *paths, size_t path_count, const char *archive_path, const char *dest_dir) {
    if (!g_files || !g_table) {
       errno = ENODEV;
       return -1;
@@ -1264,7 +1542,7 @@ int rf_save(const char *const *paths, size_t path_count, const char *archive_pat
          }
          for (size_t i = 0; i < count; i++) {
             char clean_path[PATH_MAX];
-            if (rf_normalize_path(paths[i], clean_path, sizeof(clean_path)) != 0) {
+            if (rfs_normalize_path(paths[i], clean_path, sizeof(clean_path)) != 0) {
                free(entries);
                return -1;
             }
@@ -1304,7 +1582,7 @@ int rf_save(const char *const *paths, size_t path_count, const char *archive_pat
          const ram_catalog_t *entry = entries[i];
          const ram_file_t *file = entry->file;
          struct tar_header h;
-         make_tar_header(&h, entry->path, file->size);
+         make_tar_header(&h, entry->path, file->size, file->is_dir);
          if (gzwrite(gz, &h, sizeof(h)) != (int)sizeof(h)) {
             if (errno == 0) {
                errno = EIO;
@@ -1312,6 +1590,9 @@ int rf_save(const char *const *paths, size_t path_count, const char *archive_pat
             gzclose(gz);
             free(entries);
             return -1;
+         }
+         if (file->is_dir) {
+            continue;
          }
          if (file->size > 0 && file->data != NULL) {
             if (gzwrite(gz, file->data, (unsigned)file->size) != (int)file->size) {
@@ -1358,6 +1639,10 @@ int rf_save(const char *const *paths, size_t path_count, const char *archive_pat
             snprintf(real_filepath, sizeof(real_filepath), "%s/%s", dest_dir, entry->path);
          } else {
             snprintf(real_filepath, sizeof(real_filepath), "%s", entry->path);
+         }
+         if (file->is_dir) {
+            utils_mkdir_p(real_filepath);
+            continue;
          }
          char parent_dir[PATH_MAX] = {0};
          const char *last_slash = strrchr(real_filepath, '/');
@@ -1432,10 +1717,24 @@ static int load_dir_recursive(const char *root_dir, const char *rel_sub, const c
          continue;
       }
       if (S_ISDIR(st.st_mode)) {
-         int sub_count = load_dir_recursive(root_dir, sub_rel, prefix);
-         if (sub_count >= 0) {
-            count += sub_count;
+         char ram_dir[PATH_MAX * 2];
+         if (prefix && prefix[0] != '\0') {
+            size_t plen = strlen(prefix);
+            if (prefix[plen - 1] == '/' || prefix[plen - 1] == '\\') {
+               snprintf(ram_dir, sizeof(ram_dir), "%s%s", prefix, sub_rel);
+            } else {
+               snprintf(ram_dir, sizeof(ram_dir), "%s/%s", prefix, sub_rel);
+            }
+         } else {
+            snprintf(ram_dir, sizeof(ram_dir), "%s", sub_rel);
          }
+         rfs_mkdir(ram_dir);
+         int sub_count = load_dir_recursive(root_dir, sub_rel, prefix);
+         if (sub_count < 0) {
+            closedir(d);
+            return -1;
+         }
+         count += sub_count;
       } else if (S_ISREG(st.st_mode)) {
          char ram_path[PATH_MAX * 2];
          if (prefix && prefix[0] != '\0') {
@@ -1449,26 +1748,40 @@ static int load_dir_recursive(const char *root_dir, const char *rel_sub, const c
             snprintf(ram_path, sizeof(ram_path), "%s", sub_rel);
          }
          FILE *f = fopen(full_disk_path, "rb");
-         if (f) {
-            rf_handle_t fd = rf_open(ram_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-            if (fd >= 0) {
-               char buf[4096];
-               size_t n;
-               while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-                  rf_write(fd, buf, n);
-               }
-               rf_close(fd);
-               count++;
-            }
-            fclose(f);
+         if (!f) {
+            closedir(d);
+            return -1;
          }
+         rfs_handle_t fd = rfs_open(ram_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+         if (fd < 0) {
+            int err = errno;
+            fclose(f);
+            closedir(d);
+            errno = err;
+            return -1;
+         }
+         char buf[4096];
+         size_t n;
+         while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
+            if (rfs_write(fd, buf, n) < 0) {
+               int err = errno;
+               rfs_close(fd);
+               fclose(f);
+               closedir(d);
+               errno = err;
+               return -1;
+            }
+         }
+         rfs_close(fd);
+         fclose(f);
+         count++;
       }
    }
    closedir(d);
    return count;
 }
 
-int rf_load(const char *archive_path, const char *src_dir, const char *prefix) {
+int rfs_load(const char *archive_path, const char *src_dir, const char *prefix) {
    if (!g_files || !g_access_table) {
       errno = ENODEV;
       return -1;
@@ -1527,10 +1840,18 @@ int rf_load(const char *archive_path, const char *src_dir, const char *prefix) {
          unsigned long file_size = strtoul(h.size, NULL, 8);
          size_t pad = (512 - (file_size % 512)) % 512;
          if (h.typeflag == '5' || (h.typeflag == '\0' && clean_name[strlen(clean_name) - 1] == '/')) {
+            char dir_clean[PATH_MAX];
+            strncpy(dir_clean, full_path, sizeof(dir_clean) - 1);
+            dir_clean[sizeof(dir_clean) - 1] = '\0';
+            size_t dlen = strlen(dir_clean);
+            if (dlen > 0 && dir_clean[dlen - 1] == '/') {
+               dir_clean[dlen - 1] = '\0';
+            }
+            rfs_mkdir(dir_clean);
             continue;
          }
-         rf_handle_t fd = rf_open(full_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
-         if (fd == RF_INVALID_HANDLE) {
+         rfs_handle_t fd = rfs_open(full_path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+         if (fd == RFS_INVALID_HANDLE) {
             int err = errno;
             gzclose(gz);
             errno = err;
@@ -1544,16 +1865,16 @@ int rf_load(const char *archive_path, const char *src_dir, const char *prefix) {
                int bytes = gzread(gz, buffer, to_read);
                if (bytes <= 0) {
                   int err = (errno != 0) ? errno : EIO;
-                  rf_close(fd);
+                  rfs_close(fd);
                   gzclose(gz);
                   errno = err;
                   return -1;
                }
-               rf_write(fd, buffer, (size_t)bytes);
+               rfs_write(fd, buffer, (size_t)bytes);
                remaining -= (unsigned long)bytes;
             }
          }
-         rf_close(fd);
+         rfs_close(fd);
          files_loaded++;
          if (pad > 0) {
             char dummy[512];
@@ -1574,3 +1895,5 @@ int rf_load(const char *archive_path, const char *src_dir, const char *prefix) {
       return res;
    }
 }
+
+int rfs_load_dir(const char *dir_path, const char *prefix) { return rfs_load(NULL, dir_path, prefix); }

@@ -16,7 +16,7 @@
 #include <unistd.h>
 #endif
 
-#include "ramfile.h"
+#include "ramfs.h"
 
 #define NUM_FILES 4000
 #define FILE_SIZE 512
@@ -39,10 +39,10 @@ void run_scenario() {
       payload[sizeof(payload) - 2] = '\n';
       payload[sizeof(payload) - 1] = '\0';
       int fd;
-      fd = rf_open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+      fd = rfs_open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644);
       if (fd >= 0) {
-         rf_write(fd, payload, FILE_SIZE);
-         rf_close(fd);
+         rfs_write(fd, payload, FILE_SIZE);
+         rfs_close(fd);
       } else {
          perror(filename);
          exit(1);
@@ -56,10 +56,10 @@ void run_scenario() {
          snprintf(payload, sizeof(payload), "%s\n", filename);
 #pragma GCC diagnostic pop
          int fd;
-         fd = rf_open(filename, O_RDONLY);
+         fd = rfs_open(filename, O_RDONLY);
          if (fd >= 0) {
-            rf_read(fd, read_buf, FILE_SIZE);
-            rf_close(fd);
+            rfs_read(fd, read_buf, FILE_SIZE);
+            rfs_close(fd);
             assert(strcmp(read_buf, payload) == 0);
          } else {
             perror(filename);
@@ -89,7 +89,7 @@ static double now_seconds(void) {
 int main(void) {
    memset(payload, 'A', FILE_SIZE - 1);
    payload[FILE_SIZE - 1] = '\0';
-   rf_init(NUM_FILES, 1);
+   rfs_init(NUM_FILES, 1);
    double ram = 0.0;
    unsigned count = MEASURES;
    while (count--) {
@@ -98,6 +98,6 @@ int main(void) {
       ram += now_seconds() - start;
    }
    printf("Temps passé : %.4f secondes\n", ram);
-   rf_destroy();
+   rfs_destroy();
    return 0;
 }

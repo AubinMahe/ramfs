@@ -1,9 +1,10 @@
 /* Vérifie que, avec USE_RAMFILE, le code "à l'ancienne" (open/read/write/fopen...)
- * est redirigé vers ramfile et ne touche pas au disque.
- * Les en-têtes système doivent être inclus AVANT ramfile.h : les macros
+ * est redirigé vers ramfs et ne touche pas au disque.
+ * Les en-têtes système doivent être inclus AVANT ramfs.h : les macros
  * remplacent open/read/write/close/... et casseraient leurs prototypes. */
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,10 +37,18 @@ static int disk_file_exists(const char *path) {
    return 0;
 }
 
-#define USE_RAMFILE
-#include "ramfile.h"
+#define USE_RAMFS
+#include "ramfs.h"
 
-#define FILENAME "ramfile_macro_test.dat"
+static int helper_macro_vfprintf(FILE *stream, const char *fmt, ...) {
+   va_list args;
+   va_start(args, fmt);
+   int ret = vfprintf(stream, fmt, args);
+   va_end(args);
+   return ret;
+}
+
+#define FILENAME "ramfs_macro_test.dat"
 
 static int g_fail;
 
@@ -55,7 +64,7 @@ int test_macros(void) {
    char buf[64];
    struct stat st;
    g_fail = 0;
-   rf_init(4, 4);
+   rfs_init(4, 4);
 
    /* API de bas niveau */
    int fd = open(FILENAME, O_CREAT | O_RDWR | O_TRUNC, 0644);
@@ -66,7 +75,7 @@ int test_macros(void) {
    EXPECT(read(fd, buf, sizeof(buf) - 1) == 5);
    EXPECT(strcmp(buf, "hello") == 0);
 
-   /* fstat et stat redirigés vers ramfile */
+   /* fstat et stat redirigés vers ramfs */
    EXPECT(fstat(fd, &st) == 0);
    EXPECT(st.st_size == 5);
    EXPECT(close(fd) == 0);
@@ -155,6 +164,27 @@ int test_macros(void) {
    EXPECT(access("lexer_input.idx", F_OK) == 0);
    EXPECT(remove("lexer_input.idx") == 0);
 
-   rf_destroy();
+   /* vfprintf */
+   FILE *vf = fopen("vfprintf_test.txt", "w");
+   EXPECT(vf != NULL);
+   EXPECT(helper_macro_vfprintf(vf, "LOG_CODE=%d MSG=%s\n", 42, "SUCCESS") > 0);
+   EXPECT(fclose(vf) == 0);
+   EXPECT(!disk_file_exists("vfprintf_test.txt"));
+   EXPECT(remove("vfprintf_test.txt") == 0);
+
+   /* mkdir et rmdir */
+   EXPECT(mkdir("macro_dir", 0755) == 0);
+   EXPECT(!disk_file_exists("macro_dir"));
+   EXPECT(access("macro_dir", F_OK) == 0);
+   EXPECT(rmdir("macro_dir") == 0);
+   EXPECT(access("macro_dir", F_OK) != 0);
+
+   EXPECT(_mkdir("macro_dir2") == 0);
+   EXPECT(!disk_file_exists("macro_dir2"));
+   EXPECT(access("macro_dir2", F_OK) == 0);
+   EXPECT(_rmdir("macro_dir2") == 0);
+   EXPECT(access("macro_dir2", F_OK) != 0);
+
+   rfs_destroy();
    return g_fail;
 }

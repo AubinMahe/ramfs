@@ -2,7 +2,7 @@
    "version": "0.2.0",
    "configurations": [
       {
-         "name": "ramfile/benchmark",
+         "name": "ramfs/benchmark",
          "type": "cppdbg",
          "request": "launch",
          "program": "${workspaceFolder}/build_linux/benchmark",

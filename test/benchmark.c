@@ -16,7 +16,7 @@
 #include <unistd.h>
 #endif
 
-#include "ramfile.h"
+#include "ramfs.h"
 
 #define NUM_FILES 4000
 #define FILE_SIZE 512
@@ -40,14 +40,14 @@ void run_scenario(int is_ram) {
       payload[sizeof(payload) - 1] = '\0';
       int fd;
       if (is_ram) {
-         fd = rf_open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+         fd = rfs_open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644);
       } else {
          fd = open(filename, O_CREAT | O_WRONLY | O_TRUNC, 0644);
       }
       if (fd >= 0) {
          if (is_ram) {
-            rf_write(fd, payload, FILE_SIZE);
-            rf_close(fd);
+            rfs_write(fd, payload, FILE_SIZE);
+            rfs_close(fd);
          } else {
             ssize_t unused = write(fd, payload, FILE_SIZE);
             (void)unused;
@@ -67,14 +67,14 @@ void run_scenario(int is_ram) {
 #pragma GCC diagnostic pop
          int fd;
          if (is_ram) {
-            fd = rf_open(filename, O_RDONLY);
+            fd = rfs_open(filename, O_RDONLY);
          } else {
             fd = open(filename, O_RDONLY);
          }
          if (fd >= 0) {
             if (is_ram) {
-               rf_read(fd, read_buf, FILE_SIZE);
-               rf_close(fd);
+               rfs_read(fd, read_buf, FILE_SIZE);
+               rfs_close(fd);
             } else {
                ssize_t unused = read(fd, read_buf, FILE_SIZE);
                (void)unused;
@@ -118,7 +118,7 @@ int main(void) {
       disk += now_seconds() - start;
    }
    printf("Disque : %.4f secondes\n", disk);
-   rf_init(NUM_FILES, 1);
+   rfs_init(NUM_FILES, 1);
    double ram = 0.0;
    count = MEASURES;
    while (count--) {
@@ -129,7 +129,7 @@ int main(void) {
    printf("RAM    : %.4f secondes\n", ram);
    double ratio = disk / ram;
    if (ram > 0) {
-      printf("ramfile est environ %.1fx plus rapide que le filesystem SSD.\n", ratio);
+      printf("ramfs est environ %.1fx plus rapide que le filesystem SSD.\n", ratio);
    } else {
       printf("Le temps RAM est trop proche de 0 pour calculer un ratio précis.\n");
    }
@@ -139,6 +139,6 @@ int main(void) {
       remove(filename);
    }
    rmdir(TEST_DIR);
-   rf_destroy();
+   rfs_destroy();
    return 0;
 }

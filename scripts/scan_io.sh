@@ -25,6 +25,13 @@
 #
 # 3. Opérations sur le système de fichiers (chemins réels) :
 #    - Gestion entrées    : remove, rename, renameat, access, stat, lstat
+#
+# 4. Parcours d'arborescence et répertoires :
+#    - Création / Suppression : mkdir, _mkdir, mkdirat, rmdir, _rmdir
+#    - Flux répertoire        : opendir, fdopendir, readdir, readdir_r, closedir, rewinddir, seekdir, telldir, dirfd
+#    - Balayage & Tri         : scandir, scandirat, alphasort, versionsort
+#    - Arborescences & Globs  : ftw, nftw, glob, globfree
+#    - Répertoire de travail  : chdir, fchdir, _chdir, getcwd, _getcwd, getwd, get_current_dir_name
 # ==============================================================================
 
 set -euo pipefail
@@ -51,6 +58,14 @@ FS_FUNCS=(
    remove rename renameat access stat lstat
 )
 
+DIR_FUNCS=(
+   mkdir _mkdir mkdirat rmdir _rmdir
+   opendir fdopendir readdir readdir_r closedir rewinddir seekdir telldir dirfd
+   scandir scandirat alphasort versionsort
+   ftw nftw glob globfree
+   chdir fchdir _chdir getcwd _getcwd getwd get_current_dir_name
+)
+
 # Couleurs pour la lisibilité
 C_RESET="\033[0m"
 C_BOLD="\033[1m"
@@ -75,6 +90,9 @@ EOF
    echo ""
    echo -e "${C_BOLD}3. Gestion système de fichiers (chemins) :${C_RESET}"
    echo -e "   ${FS_FUNCS[*]}"
+   echo ""
+   echo -e "${C_BOLD}4. Parcours d'arborescence et répertoires :${C_RESET}"
+   echo -e "   ${DIR_FUNCS[*]}"
    echo "=============================================================================="
    echo ""
 }
@@ -86,13 +104,19 @@ usage() {
    echo "  -a, --all         Recherche toutes les catégories (défaut)"
    echo "  -f, --fd-only     Recherche uniquement les descripteurs (int fd)"
    echo "  -F, --file-only   Recherche uniquement les flux (FILE*)"
-   echo "  -s, --summary     Affiche uniquement le tableau récapitulatif des occurrences"
+   echo "  -d, --dir-only    Recherche uniquement les répertoires et arborescences (mkdir, opendir, readdir, ...)"
+   echo "  -s, --summary     Affiche le récapitulatif (fonctions et fichiers concernés)"
+   echo "  -l, --files       Affiche uniquement la liste des fichiers concernés"
+   echo "  -t, --todo        Filtre pour n'afficher que les fichiers restant à équiper"
+   echo "      --raw         Affiche uniquement les chemins bruts des fichiers (un par ligne)"
    echo "  -h, --help        Affiche cette aide"
    echo ""
    echo "Exemples :"
    echo "  $0 /chemin/vers/code_legacy"
    echo "  $0 --summary ./legacy_src"
-   echo "  $0 --file-only ./mon_module.c"
+   echo "  $0 --files ./legacy_src"
+   echo "  $0 -l --todo ./legacy_src"
+   echo "  $0 -l --raw ./legacy_src"
    exit 0
 }
 
@@ -100,6 +124,9 @@ usage() {
 TARGET_PATH="."
 MODE="all"
 SUMMARY_ONLY=0
+FILES_ONLY=0
+TODO_ONLY=0
+RAW_OUTPUT=0
 
 while [[ $# -gt 0 ]]; do
    case "$1" in
@@ -115,8 +142,24 @@ while [[ $# -gt 0 ]]; do
          MODE="file"
          shift
          ;;
+      -d|--dir-only)
+         MODE="dir"
+         shift
+         ;;
       -s|--summary)
          SUMMARY_ONLY=1
+         shift
+         ;;
+      -l|--files|--files-only)
+         FILES_ONLY=1
+         shift
+         ;;
+      -t|--todo)
+         TODO_ONLY=1
+         shift
+         ;;
+      --raw)
+         RAW_OUTPUT=1
          shift
          ;;
       -h|--help)
@@ -138,28 +181,37 @@ if [[ ! -e "$TARGET_PATH" ]]; then
    exit 1
 fi
 
-# Première action demandée : lister les fonctions en tête
-print_header
+# Affichage de l'en-tête (sauf en mode chemins bruts ou liste exclusive)
+if [[ $RAW_OUTPUT -eq 0 && $FILES_ONLY -eq 0 ]]; then
+   print_header
+fi
 
 # Construction de la liste des fonctions selon le mode
 SELECTED_FUNCS=()
 case "$MODE" in
    fd)
       SELECTED_FUNCS=("${FD_FUNCS[@]}")
-      echo -e "${C_YELLOW}Mode actif : Descripteurs (int fd) uniquement${C_RESET}"
+      [[ $RAW_OUTPUT -eq 0 && $FILES_ONLY -eq 0 ]] && echo -e "${C_YELLOW}Mode actif : Descripteurs (int fd) uniquement${C_RESET}"
       ;;
    file)
       SELECTED_FUNCS=("${FILE_FUNCS[@]}")
-      echo -e "${C_YELLOW}Mode actif : Flux (FILE*) uniquement${C_RESET}"
+      [[ $RAW_OUTPUT -eq 0 && $FILES_ONLY -eq 0 ]] && echo -e "${C_YELLOW}Mode actif : Flux (FILE*) uniquement${C_RESET}"
+      ;;
+   dir)
+      SELECTED_FUNCS=("${DIR_FUNCS[@]}")
+      [[ $RAW_OUTPUT -eq 0 && $FILES_ONLY -eq 0 ]] && echo -e "${C_YELLOW}Mode actif : Répertoires et arborescences uniquement${C_RESET}"
       ;;
    all)
-      SELECTED_FUNCS=("${FD_FUNCS[@]}" "${FILE_FUNCS[@]}" "${FS_FUNCS[@]}")
-      echo -e "${C_YELLOW}Mode actif : Toutes les fonctions (fd, FILE*, chemins)${C_RESET}"
+      SELECTED_FUNCS=("${FD_FUNCS[@]}" "${FILE_FUNCS[@]}" "${FS_FUNCS[@]}" "${DIR_FUNCS[@]}")
+      [[ $RAW_OUTPUT -eq 0 && $FILES_ONLY -eq 0 ]] && echo -e "${C_YELLOW}Mode actif : Toutes les fonctions (fd, FILE*, chemins, répertoires)${C_RESET}"
       ;;
 esac
 
-echo -e "${C_GRAY}Cible analysée : $TARGET_PATH${C_RESET}"
-echo ""
+# Affichage du mode et de la cible (sauf en mode brut ou liste exclusive)
+if [[ $RAW_OUTPUT -eq 0 && $FILES_ONLY -eq 0 ]]; then
+   echo -e "${C_GRAY}Cible analysée : $TARGET_PATH${C_RESET}"
+   echo ""
+fi
 
 # Construction de la regex d'appel de fonction : \b(func1|func2|...)[[:space:]]*\(
 REGEX_FUNCS=$(IFS='|'; echo "${SELECTED_FUNCS[*]}")
@@ -178,7 +230,9 @@ if [[ ${#FILES[@]} -eq 0 ]]; then
    if [[ -f "$TARGET_PATH" ]]; then
       FILES=("$TARGET_PATH")
    else
-      echo -e "${C_YELLOW}Aucun fichier source C/C++ trouvé dans '$TARGET_PATH'.${C_RESET}"
+      if [[ $RAW_OUTPUT -eq 0 ]]; then
+         echo -e "${C_YELLOW}Aucun fichier source C/C++ trouvé dans '$TARGET_PATH'.${C_RESET}"
+      fi
       exit 0
    fi
 fi
@@ -189,9 +243,13 @@ for f in "${SELECTED_FUNCS[@]}"; do
    COUNTS["$f"]=0
 done
 
+declare -A FILE_CALLS
+declare -A FILE_EQUIPPED
+MATCHED_FILES=()
+
 TOTAL_MATCHES=0
 
-if [[ $SUMMARY_ONLY -eq 0 ]]; then
+if [[ $SUMMARY_ONLY -eq 0 && $FILES_ONLY -eq 0 && $RAW_OUTPUT -eq 0 ]]; then
    echo -e "${C_BOLD}Occurrences détaillées trouvées :${C_RESET}"
    echo "------------------------------------------------------------------------------"
 fi
@@ -201,52 +259,132 @@ for file in "${FILES[@]}"; do
    # Extraction des correspondances avec numéros de lignes
    MATCHES=$(grep -En "$PATTERN" "$file" 2>/dev/null || true)
    if [[ -n "$MATCHES" ]]; then
-      if [[ $SUMMARY_ONLY -eq 0 ]]; then
+      FILE_COUNT=0
+      if [[ $SUMMARY_ONLY -eq 0 && $FILES_ONLY -eq 0 && $RAW_OUTPUT -eq 0 ]]; then
          echo -e "${C_CYAN}${C_BOLD}$file${C_RESET}"
       fi
-      while IFS= read -r line; do
-         LINE_NUM="${line%%:*}"
-         LINE_CONTENT="${line#*:}"
-         
-         # Identifier quelle(s) fonction(s) ont matché sur cette ligne pour le décompte
-         for f in "${SELECTED_FUNCS[@]}"; do
-            # Décompte du nombre de fois où la fonction apparaît sur la ligne
-            OCCURRENCES=$(grep -o -E "\\b$f[[:space:]]*\\(" <<< "$LINE_CONTENT" | wc -l || true)
-            if [[ $OCCURRENCES -gt 0 ]]; then
-               COUNTS["$f"]=$(( COUNTS["$f"] + OCCURRENCES ))
-               TOTAL_MATCHES=$(( TOTAL_MATCHES + OCCURRENCES ))
-            fi
-         done
-         
-         if [[ $SUMMARY_ONLY -eq 0 ]]; then
-            # Coloration de la ligne : numéro en vert, code indenté
-            echo -e "  ${C_GREEN}${LINE_NUM}${C_RESET}: $LINE_CONTENT"
+
+      # Décompte ultra-rapide des occurrences par fonction dans le fichier
+      while IFS= read -r fname; do
+         [[ -z "$fname" ]] && continue
+         if [[ -v COUNTS["$fname"] ]]; then
+            COUNTS["$fname"]=$(( COUNTS["$fname"] + 1 ))
+            TOTAL_MATCHES=$(( TOTAL_MATCHES + 1 ))
+            FILE_COUNT=$(( FILE_COUNT + 1 ))
          fi
-      done <<< "$MATCHES"
-      if [[ $SUMMARY_ONLY -eq 0 ]]; then
+      done < <(grep -o -E "$PATTERN" "$file" 2>/dev/null | sed -E 's/[[:space:]]*\(//' || true)
+
+      # Affichage des lignes avec numéros (uniquement si mode détaillé)
+      if [[ $SUMMARY_ONLY -eq 0 && $FILES_ONLY -eq 0 && $RAW_OUTPUT -eq 0 ]]; then
+         while IFS= read -r line; do
+            LINE_NUM="${line%%:*}"
+            LINE_CONTENT="${line#*:}"
+            echo -e "  ${C_GREEN}${LINE_NUM}${C_RESET}: $LINE_CONTENT"
+         done <<< "$MATCHES"
+      fi
+
+      if [[ $FILE_COUNT -gt 0 ]]; then
+         MATCHED_FILES+=("$file")
+         FILE_CALLS["$file"]=$FILE_COUNT
+         if grep -qE "(USE_RAMFS|USE_RAMFILE|ramfs\.h|ramfile\.h)" "$file" 2>/dev/null; then
+            FILE_EQUIPPED["$file"]=1
+         else
+            FILE_EQUIPPED["$file"]=0
+         fi
+      fi
+
+      if [[ $SUMMARY_ONLY -eq 0 && $FILES_ONLY -eq 0 && $RAW_OUTPUT -eq 0 ]]; then
          echo ""
       fi
    fi
 done
 
-# Affichage du tableau récapitulatif
-echo "=============================================================================="
-echo -e "${C_BOLD}RÉCAPITULATIF DES OCCURRENCES TROUVÉES (Total : $TOTAL_MATCHES)${C_RESET}"
-echo "=============================================================================="
-printf "%-20s %s\n" "Fonction" "Nombre d'appels"
-echo "------------------------------------------------------------------------------"
+# Affichage du tableau récapitulatif des fonctions (sauf si mode fichiers uniquement ou brut)
+if [[ $FILES_ONLY -eq 0 && $RAW_OUTPUT -eq 0 ]]; then
+   echo "=============================================================================="
+   echo -e "${C_BOLD}RÉCAPITULATIF DES OCCURRENCES TROUVÉES (Total : $TOTAL_MATCHES)${C_RESET}"
+   echo "=============================================================================="
+   printf "%-20s %s\n" "Fonction" "Nombre d'appels"
+   echo "------------------------------------------------------------------------------"
 
-ANY_FOUND=0
-for f in "${SELECTED_FUNCS[@]}"; do
-   CNT="${COUNTS["$f"]}"
-   if [[ $CNT -gt 0 ]]; then
-      printf "%-20s %b%d%b\n" "$f" "${C_BOLD}${C_YELLOW}" "$CNT" "${C_RESET}"
-      ANY_FOUND=1
+   ANY_FOUND=0
+   for f in "${SELECTED_FUNCS[@]}"; do
+      CNT="${COUNTS["$f"]}"
+      if [[ $CNT -gt 0 ]]; then
+         printf "%-20s %b%d%b\n" "$f" "${C_BOLD}${C_YELLOW}" "$CNT" "${C_RESET}"
+         ANY_FOUND=1
+      fi
+   done
+
+   if [[ $ANY_FOUND -eq 0 ]]; then
+      echo -e "${C_GREEN}Aucun appel d'E/S de fichier détecté dans les fichiers analysés.${C_RESET}"
    fi
-done
-
-if [[ $ANY_FOUND -eq 0 ]]; then
-   echo -e "${C_GREEN}Aucun appel d'E/S de fichier détecté dans les fichiers analysés.${C_RESET}"
+   echo "=============================================================================="
 fi
-echo "=============================================================================="
+
+# Affichage des fichiers concernés
+print_affected_files() {
+   local total_files=${#MATCHED_FILES[@]}
+   local needed_count=0
+   local already_count=0
+
+   for file in "${MATCHED_FILES[@]}"; do
+      if [[ "${FILE_EQUIPPED["$file"]}" -eq 1 ]]; then
+         already_count=$(( already_count + 1 ))
+      else
+         needed_count=$(( needed_count + 1 ))
+      fi
+   done
+
+   if [[ $RAW_OUTPUT -eq 1 ]]; then
+      for file in "${MATCHED_FILES[@]}"; do
+         if [[ $TODO_ONLY -eq 1 && "${FILE_EQUIPPED["$file"]}" -eq 1 ]]; then
+            continue
+         fi
+         echo "$file"
+      done
+      return
+   fi
+
+   echo ""
+   echo "=============================================================================="
+   echo -e "${C_BOLD}FICHIERS CONCERNÉS (Total : $total_files fichier(s) détecté(s))${C_RESET}"
+   echo "=============================================================================="
+   echo -e "Pour chaque fichier cible, ajouter en tête (après les en-têtes système <...>)"
+   echo -e "et avant tout appel d'E/S :"
+   echo -e "  ${C_CYAN}#define USE_RAMFS${C_RESET}"
+   echo -e "  ${C_CYAN}#include \"ramfs.h\"${C_RESET}"
+   echo "------------------------------------------------------------------------------"
+   printf "  %-50s %-16s %s\n" "Fichier" "Appels d'E/S" "Statut"
+   echo "------------------------------------------------------------------------------"
+
+   local shown=0
+   for file in "${MATCHED_FILES[@]}"; do
+      if [[ $TODO_ONLY -eq 1 && "${FILE_EQUIPPED["$file"]}" -eq 1 ]]; then
+         continue
+      fi
+      local calls="${FILE_CALLS["$file"]}"
+      local status_str
+      if [[ "${FILE_EQUIPPED["$file"]}" -eq 1 ]]; then
+         status_str="${C_GREEN}[DÉJÀ ÉQUIPÉ]${C_RESET}"
+      else
+         status_str="${C_YELLOW}${C_BOLD}[À ÉQUIPER]${C_RESET}"
+      fi
+      printf "  %-50s %-16s %b\n" "$file" "($calls appel(s))" "$status_str"
+      shown=$(( shown + 1 ))
+   done
+
+   if [[ $shown -eq 0 ]]; then
+      if [[ $total_files -gt 0 && $TODO_ONLY -eq 1 ]]; then
+         echo -e "  ${C_GREEN}Tous les fichiers concernés ($total_files) sont déjà équipés !${C_RESET}"
+      else
+         echo -e "  ${C_GREEN}Aucun fichier ne nécessite de redirection ramfs.${C_RESET}"
+      fi
+   fi
+   echo "------------------------------------------------------------------------------"
+   echo -e "Bilan : ${C_BOLD}${C_YELLOW}$needed_count fichier(s) à équiper${C_RESET}, ${C_GREEN}$already_count déjà équipé(s)${C_RESET}."
+   echo "=============================================================================="
+}
+
+print_affected_files
 
