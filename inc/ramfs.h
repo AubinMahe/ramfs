@@ -95,18 +95,27 @@ RAMFS_API int rfs_fscanf(FILE *stream, const char *format, ...);
 RAMFS_API int rfs_fclose(FILE *stream);
 
 /**
- * Sauvegarde une sélection de fichiers en mémoire vers une archive compressée (.tar.gz) ou vers le disque.
+ * Sauvegarde une sélection ou la totalité des fichiers en mémoire vers une archive compressée (.tar.gz).
  *
- * @param paths tableau de chemins à sauvegarder (si NULL, tous les fichiers en mémoire sont sauvegardés).
+ * @param archive_path chemin de l'archive .tar.gz à créer (ne doit pas être NULL).
+ * @param paths tableau optionnel de chemins à sauvegarder (si NULL, tous les fichiers sont archivés).
  * @param path_count nombre d'éléments dans paths (si 0 et paths != NULL, le tableau est considéré terminé par NULL).
- * @param archive_path si non NULL, crée une archive compressée .tar.gz contenant les fichiers sélectionnés.
- * @param dest_dir si archive_path == NULL, répertoire racine de destination sur disque (si NULL, relatif au PWD).
  * @return 0 en cas de succès, -1 en cas d'erreur (errno positionné).
  */
-RAMFS_API int rfs_save(const char *const *paths, size_t path_count, const char *archive_path, const char *dest_dir);
+RAMFS_API int rfs_save_archive(const char *archive_path, const char *const *paths, size_t path_count);
 
 /**
- * Réciproque de rfs_save : charge et peuple la mémoire de ramfs depuis une archive (.tar.gz) ou le disque.
+ * Sauvegarde une sélection ou la totalité des fichiers en mémoire en recréant l'arborescence sur le disque.
+ *
+ * @param dest_dir répertoire racine de destination sur disque (si NULL, dossier courant ".").
+ * @param paths tableau optionnel de chemins à sauvegarder (si NULL, tous les fichiers sont exportés).
+ * @param path_count nombre d'éléments dans paths (si 0 et paths != NULL, le tableau est considéré terminé par NULL).
+ * @return 0 en cas de succès, -1 en cas d'erreur (errno positionné).
+ */
+RAMFS_API int rfs_save_dir(const char *dest_dir, const char *const *paths, size_t path_count);
+
+/**
+ * Charge et peuple la mémoire de ramfs depuis une archive (.tar.gz) ou le disque.
  *
  * @param archive_path si non NULL, chemin de l'archive compressée .tar.gz à charger en mémoire.
  * @param src_dir si archive_path == NULL, répertoire racine source sur disque à charger (si NULL, relatif au PWD).

@@ -678,19 +678,19 @@ static void test_save_load_disk(void) {
    CHECK(put("b.dat", "BBBB"));
 
    /* Sauvegarde totale sur disque dans test-out */
-   CHECK(rfs_save(NULL, 0, NULL, "test-out") == 0);
+   CHECK(rfs_save_dir("test-out", NULL, 0) == 0);
    CHECK(read_real("test-out/dir/sub/a.dat", buf, sizeof(buf)) == 3 && memcmp(buf, "AAA", 3) == 0);
    CHECK(read_real("test-out/b.dat", buf, sizeof(buf)) == 4 && memcmp(buf, "BBBB", 4) == 0);
 
    /* Sauvegarde sélective sur disque dans test-out-sel */
    const char *only_b[] = {"b.dat"};
-   CHECK(rfs_save(only_b, 1, NULL, "test-out-sel") == 0);
+   CHECK(rfs_save_dir("test-out-sel", only_b, 1) == 0);
    CHECK(read_real("test-out-sel/b.dat", buf, sizeof(buf)) == 4 && memcmp(buf, "BBBB", 4) == 0);
    CHECK(stat("test-out-sel/dir/sub/a.dat", &st) != 0);
 
    /* Erreur si chemin inexistant */
    const char *missing[] = {"absent.dat"};
-   CHECK_FAIL(rfs_save(missing, 1, NULL, "test-out"), -1, ENOENT);
+   CHECK_FAIL(rfs_save_dir("test-out", missing, 1), -1, ENOENT);
 
    /* Chargement depuis le disque */
    rfs_destroy();
@@ -729,11 +729,16 @@ static void test_save_load_archive(void) {
    CHECK(put("folder/nested.bin", "Binary Nested Data"));
 
    /* Sauvegarde totale dans une archive .tar.gz */
-   CHECK(rfs_save(NULL, 0, "test_archive.tar.gz", NULL) == 0);
+   CHECK(rfs_save_archive("test_archive.tar.gz", NULL, 0) == 0);
 
    /* Sauvegarde sélective dans une autre archive */
    const char *only_alpha[] = {"alpha.txt"};
-   CHECK(rfs_save(only_alpha, 1, "test_sel.tar.gz", NULL) == 0);
+   CHECK(rfs_save_archive("test_sel.tar.gz", only_alpha, 1) == 0);
+
+   /* Cas d'erreurs */
+   const char *missing[] = {"absent.dat"};
+   CHECK_FAIL(rfs_save_archive(NULL, NULL, 0), -1, EINVAL);
+   CHECK_FAIL(rfs_save_archive("test_sel.tar.gz", missing, 1), -1, ENOENT);
 
    /* Réinitialisation de la mémoire ramfs */
    rfs_destroy();

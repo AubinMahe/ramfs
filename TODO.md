@@ -43,7 +43,7 @@ Fonctions implémentées et redirigées :
 
 - [x] **Normalisation syntaxique des chemins avant hachage / recherche (`rfs_normalize_path`) :**
   - *Comportement :* Remplacement automatique des séparateurs `\` par `/`, élimination des préfixes et composants redondants `./`, repliement des doubles séparateurs `//`, résolution des composants relatifs `..` et conservation des lettres de lecteur Windows (`C:`).
-  - *Résultat :* `rfs_open`, `rfs_unlink`, `rfs_stat` et `rfs_save` résolvent de manière identique `"donnees.dat"`, `"./donnees.dat"`, `"dir\\sub\\f.dat"` et `"dir//sub/./f.dat"`.
+  - *Résultat :* `rfs_open`, `rfs_unlink`, `rfs_stat`, `rfs_save_archive` et `rfs_save_dir` résolvent de manière identique `"donnees.dat"`, `"./donnees.dat"`, `"dir\\sub\\f.dat"` et `"dir//sub/./f.dat"`.
 
 ---
 
@@ -101,4 +101,4 @@ Fonctions implémentées et redirigées :
   - `rfs_remove` délègue automatiquement à `rfs_rmdir` pour les répertoires et à `rfs_unlink` pour les fichiers.
   - `rfs_stat` positionne `S_IFDIR | 0755` pour les répertoires.
   - `rfs_access` autorise `X_OK` sur les répertoires virtuels.
-  - `rfs_save` et `rfs_load` prennent en charge les dossiers (typeflag `'5'` dans les archives `.tar.gz`, création récursive sur disque sans appel erroné à `fopen`).
+  - `rfs_save_archive`, `rfs_save_dir` et `rfs_load` prennent en charge les dossiers (typeflag `'5'` dans les archives `.tar.gz`, création récursive sur disque sans appel erroné à `fopen`).

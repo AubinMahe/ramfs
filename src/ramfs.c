@@ -1518,10 +1518,10 @@ static void make_tar_header(struct tar_header *h, const char *path, size_t size,
    snprintf(h->chksum, sizeof(h->chksum), "%06o", sum);
 }
 
-int rfs_save(const char *const *paths, size_t path_count, const char *archive_path, const char *dest_dir) {
+static const ram_catalog_t **collect_save_entries(const char *const *paths, size_t path_count, size_t *out_count) {
    if (!g_files || !g_table) {
       errno = ENODEV;
-      return -1;
+      return NULL;
    }
 
    const ram_catalog_t **entries = NULL;
@@ -1538,19 +1538,19 @@ int rfs_save(const char *const *paths, size_t path_count, const char *archive_pa
          entries = malloc(count * sizeof(ram_catalog_t *));
          if (!entries) {
             errno = ENOMEM;
-            return -1;
+            return NULL;
          }
          for (size_t i = 0; i < count; i++) {
             char clean_path[PATH_MAX];
             if (rfs_normalize_path(paths[i], clean_path, sizeof(clean_path)) != 0) {
                free(entries);
-               return -1;
+               return NULL;
             }
             ram_catalog_t *e = search_in_catalog(clean_path, hash_path(clean_path));
             if (!e || !e->file) {
                free(entries);
                errno = ENOENT;
-               return -1;
+               return NULL;
             }
             entries[n_entries++] = e;
          }
@@ -1559,7 +1559,7 @@ int rfs_save(const char *const *paths, size_t path_count, const char *archive_pa
       entries = malloc((g_files_capacity + 1) * sizeof(ram_catalog_t *));
       if (!entries) {
          errno = ENOMEM;
-         return -1;
+         return NULL;
       }
       for (size_t i = 0; i <= g_table_mask; i++) {
          const ram_catalog_t *e = g_table + i;
@@ -1568,22 +1568,49 @@ int rfs_save(const char *const *paths, size_t path_count, const char *archive_pa
          }
       }
    }
-   if (archive_path != NULL) {
-      gzFile gz = gzopen(archive_path, "wb9");
-      if (!gz) {
+   *out_count = n_entries;
+   return entries;
+}
+
+int rfs_save_archive(const char *archive_path, const char *const *paths, size_t path_count) {
+   if (!archive_path) {
+      errno = EINVAL;
+      return -1;
+   }
+
+   size_t n_entries = 0;
+   const ram_catalog_t **entries = collect_save_entries(paths, path_count, &n_entries);
+   if (!entries && errno != 0) {
+      return -1;
+   }
+
+   gzFile gz = gzopen(archive_path, "wb9");
+   if (!gz) {
+      if (errno == 0) {
+         errno = EIO;
+      }
+      free(entries);
+      return -1;
+   }
+   char zeros[512] = {0};
+   for (size_t i = 0; i < n_entries; i++) {
+      const ram_catalog_t *entry = entries[i];
+      const ram_file_t *file = entry->file;
+      struct tar_header h;
+      make_tar_header(&h, entry->path, file->size, file->is_dir);
+      if (gzwrite(gz, &h, sizeof(h)) != (int)sizeof(h)) {
          if (errno == 0) {
             errno = EIO;
          }
+         gzclose(gz);
          free(entries);
          return -1;
       }
-      char zeros[512] = {0};
-      for (size_t i = 0; i < n_entries; i++) {
-         const ram_catalog_t *entry = entries[i];
-         const ram_file_t *file = entry->file;
-         struct tar_header h;
-         make_tar_header(&h, entry->path, file->size, file->is_dir);
-         if (gzwrite(gz, &h, sizeof(h)) != (int)sizeof(h)) {
+      if (file->is_dir) {
+         continue;
+      }
+      if (file->size > 0 && file->data != NULL) {
+         if (gzwrite(gz, file->data, (unsigned)file->size) != (int)file->size) {
             if (errno == 0) {
                errno = EIO;
             }
@@ -1591,100 +1618,95 @@ int rfs_save(const char *const *paths, size_t path_count, const char *archive_pa
             free(entries);
             return -1;
          }
-         if (file->is_dir) {
-            continue;
-         }
-         if (file->size > 0 && file->data != NULL) {
-            if (gzwrite(gz, file->data, (unsigned)file->size) != (int)file->size) {
-               if (errno == 0) {
-                  errno = EIO;
-               }
-               gzclose(gz);
-               free(entries);
-               return -1;
+      }
+      size_t pad = (512 - (file->size % 512)) % 512;
+      if (pad > 0) {
+         if (gzwrite(gz, zeros, (unsigned)pad) != (int)pad) {
+            if (errno == 0) {
+               errno = EIO;
             }
-         }
-         size_t pad = (512 - (file->size % 512)) % 512;
-         if (pad > 0) {
-            if (gzwrite(gz, zeros, (unsigned)pad) != (int)pad) {
-               if (errno == 0) {
-                  errno = EIO;
-               }
-               gzclose(gz);
-               free(entries);
-               return -1;
-            }
+            gzclose(gz);
+            free(entries);
+            return -1;
          }
       }
-      gzwrite(gz, zeros, 512);
-      gzwrite(gz, zeros, 512);
-      if (gzclose(gz) != Z_OK) {
+   }
+   gzwrite(gz, zeros, 512);
+   gzwrite(gz, zeros, 512);
+   if (gzclose(gz) != Z_OK) {
+      if (errno == 0) {
+         errno = EIO;
+      }
+      free(entries);
+      return -1;
+   }
+   free(entries);
+   return 0;
+}
+
+int rfs_save_dir(const char *dest_dir, const char *const *paths, size_t path_count) {
+   size_t n_entries = 0;
+   const ram_catalog_t **entries = collect_save_entries(paths, path_count, &n_entries);
+   if (!entries && errno != 0) {
+      return -1;
+   }
+
+   if (dest_dir != NULL && strcmp(dest_dir, ".") != 0 && strcmp(dest_dir, "") != 0) {
+      utils_mkdir_p(dest_dir);
+   }
+   for (size_t i = 0; i < n_entries; i++) {
+      const ram_catalog_t *entry = entries[i];
+      const ram_file_t *file = entry->file;
+      char real_filepath[PATH_MAX];
+      if (dest_dir != NULL && strcmp(dest_dir, ".") != 0 && strcmp(dest_dir, "") != 0) {
+         snprintf(real_filepath, sizeof(real_filepath), "%s/%s", dest_dir, entry->path);
+      } else {
+         snprintf(real_filepath, sizeof(real_filepath), "%s", entry->path);
+      }
+      if (file->is_dir) {
+         utils_mkdir_p(real_filepath);
+         continue;
+      }
+      char parent_dir[PATH_MAX] = {0};
+      const char *last_slash = strrchr(real_filepath, '/');
+      const char *last_backslash = strrchr(real_filepath, '\\');
+      const char *sep = (last_slash > last_backslash) ? last_slash : last_backslash;
+      if (sep) {
+         size_t sep_len = (size_t)(sep - real_filepath);
+         if (sep_len >= sizeof(parent_dir)) {
+            sep_len = sizeof(parent_dir) - 1;
+         }
+         memcpy(parent_dir, real_filepath, sep_len);
+         utils_mkdir_p(parent_dir);
+      }
+      FILE *f = fopen(real_filepath, "wb");
+      if (!f) {
          if (errno == 0) {
             errno = EIO;
          }
          free(entries);
          return -1;
       }
-      free(entries);
-      return 0;
-   } else {
-      if (dest_dir != NULL && strcmp(dest_dir, ".") != 0 && strcmp(dest_dir, "") != 0) {
-         utils_mkdir_p(dest_dir);
-      }
-      for (size_t i = 0; i < n_entries; i++) {
-         const ram_catalog_t *entry = entries[i];
-         const ram_file_t *file = entry->file;
-         char real_filepath[PATH_MAX];
-         if (dest_dir != NULL && strcmp(dest_dir, ".") != 0 && strcmp(dest_dir, "") != 0) {
-            snprintf(real_filepath, sizeof(real_filepath), "%s/%s", dest_dir, entry->path);
-         } else {
-            snprintf(real_filepath, sizeof(real_filepath), "%s", entry->path);
-         }
-         if (file->is_dir) {
-            utils_mkdir_p(real_filepath);
-            continue;
-         }
-         char parent_dir[PATH_MAX] = {0};
-         const char *last_slash = strrchr(real_filepath, '/');
-         const char *last_backslash = strrchr(real_filepath, '\\');
-         const char *sep = (last_slash > last_backslash) ? last_slash : last_backslash;
-         if (sep) {
-            size_t sep_len = (size_t)(sep - real_filepath);
-            if (sep_len >= sizeof(parent_dir)) {
-               sep_len = sizeof(parent_dir) - 1;
-            }
-            memcpy(parent_dir, real_filepath, sep_len);
-            utils_mkdir_p(parent_dir);
-         }
-         FILE *f = fopen(real_filepath, "wb");
-         if (!f) {
+      if (file->size > 0 && file->data != NULL) {
+         if (fwrite(file->data, 1, file->size, f) != file->size) {
             if (errno == 0) {
                errno = EIO;
             }
-            free(entries);
-            return -1;
-         }
-         if (file->size > 0 && file->data != NULL) {
-            if (fwrite(file->data, 1, file->size, f) != file->size) {
-               if (errno == 0) {
-                  errno = EIO;
-               }
-               fclose(f);
-               free(entries);
-               return -1;
-            }
-         }
-         if (fclose(f) != 0) {
-            if (errno == 0) {
-               errno = EIO;
-            }
+            fclose(f);
             free(entries);
             return -1;
          }
       }
-      free(entries);
-      return 0;
+      if (fclose(f) != 0) {
+         if (errno == 0) {
+            errno = EIO;
+         }
+         free(entries);
+         return -1;
+      }
    }
+   free(entries);
+   return 0;
 }
 
 static int load_dir_recursive(const char *root_dir, const char *rel_sub, const char *prefix) {

@@ -60,13 +60,16 @@ Sur des architectures modernes, ces opérations génèrent des millions d'appels
 
 ---
 
-## Sauvegarde & Chargement : `rfs_save` / `rfs_load`
+## Sauvegarde & Chargement : `rfs_save_*` / `rfs_load`
 
-Deux fonctions permettent de persister et de restaurer l'état mémoire :
+Des fonctions dédiées permettent d'exporter et d'importer l'état mémoire :
 
 ```c
-/* Sauvegarde sélective ou totale vers une archive .tar.gz ou le disque */
-int rfs_save(const char *const *paths, size_t path_count, const char *archive_path, const char *dest_dir);
+/* Sauvegarde sélective ou totale vers une archive .tar.gz */
+int rfs_save_archive(const char *archive_path, const char *const *paths, size_t path_count);
+
+/* Sauvegarde sélective ou totale en recréant l'arborescence sur le disque */
+int rfs_save_dir(const char *dest_dir, const char *const *paths, size_t path_count);
 
 /* Chargement et décompression d'une archive .tar.gz ou importation depuis le disque */
 int rfs_load(const char *archive_path, const char *src_dir, const char *prefix);
