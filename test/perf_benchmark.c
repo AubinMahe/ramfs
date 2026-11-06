@@ -14,6 +14,7 @@
 #include <windows.h>
 #define MKDIR(p) _mkdir(p)
 #define RMDIR(p) _rmdir(p)
+
 static double now_sec(void) {
    LARGE_INTEGER freq, cnt;
    QueryPerformanceFrequency(&freq);
@@ -24,6 +25,7 @@ static double now_sec(void) {
 #include <unistd.h>
 #define MKDIR(p) mkdir(p, 0755)
 #define RMDIR(p) rmdir(p)
+
 static double now_sec(void) {
    struct timespec ts;
    clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -243,9 +245,11 @@ int main(void) {
    double r_unl = (m_ram.t_unlink > 0) ? (m_disk.t_unlink / m_ram.t_unlink) : 0;
    double r_total = (m_ram.t_total > 0) ? (m_disk.t_total / m_ram.t_total) : 0;
 
-   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Création & écriture (5000)", m_disk.t_create_write, m_ram.t_create_write, r_write);
+   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Création & écriture (5000)", m_disk.t_create_write, m_ram.t_create_write,
+          r_write);
    printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Relecture x2 (10000)", m_disk.t_read_verify, m_ram.t_read_verify, r_read);
-   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Mises à jour in-place (2500)", m_disk.t_update_seek, m_ram.t_update_seek, r_upd);
+   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Mises à jour in-place (2500)", m_disk.t_update_seek, m_ram.t_update_seek,
+          r_upd);
    printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Sondage stat (5000)", m_disk.t_stat, m_ram.t_stat, r_stat);
    printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Suppression unlink (5000)", m_disk.t_unlink, m_ram.t_unlink, r_unl);
    printf("================================================================================\n");

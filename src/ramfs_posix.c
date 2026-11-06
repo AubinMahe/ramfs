@@ -172,14 +172,12 @@ ssize_t rfs_read(rfs_handle_t fd, void *buf, size_t count) {
       }
       return 0;
    }
-   size_t available = file->size - (size_t)acc->shared_offset->offset;
-   size_t to_read = count > available ? available : count;
-   memcpy(buf, file->data + acc->shared_offset->offset, to_read);
-   acc->shared_offset->offset += (off_t)to_read;
-   if (count > available) {
+   size_t n = rfs_file_read_bytes(file, (size_t)acc->shared_offset->offset, buf, count);
+   acc->shared_offset->offset += (off_t)n;
+   if (n < count) {
       acc->eof = 1;
    }
-   return (ssize_t)to_read;
+   return (ssize_t)n;
 }
 
 ssize_t rfs_write(rfs_handle_t fd, const void *buf, size_t count) {
@@ -207,30 +205,15 @@ ssize_t rfs_write(rfs_handle_t fd, const void *buf, size_t count) {
    if (acc->flags & O_APPEND) {
       acc->shared_offset->offset = (off_t)file->size;
    }
-   size_t required_size = (size_t)acc->shared_offset->offset + count;
-   if (required_size > file->capacity) {
-      size_t new_capacity = file->capacity == 0 ? RAMFS_INITIAL_CAPACITY : file->capacity * 2;
-      while (new_capacity < required_size) {
-         new_capacity *= 2;
-      }
-      unsigned char *new_data = realloc(file->data, new_capacity);
-      if (!new_data) {
-         acc->error = 1;
-         errno = ENOMEM;
-         return -1;
-      }
-      file->data = new_data;
-      file->capacity = new_capacity;
+   if (count == 0) {
+      return 0;
    }
-   if ((size_t)acc->shared_offset->offset > file->size) {
-      /* écriture après un lseek au-delà de la fin : le trou est rempli de zéros */
-      memset(file->data + file->size, 0, (size_t)acc->shared_offset->offset - file->size);
+   if (rfs_file_write_bytes(file, (size_t)acc->shared_offset->offset, buf, count) != 0) {
+      acc->error = 1;
+      errno = ENOMEM;
+      return -1;
    }
-   memcpy(file->data + acc->shared_offset->offset, buf, count);
    acc->shared_offset->offset += (off_t)count;
-   if ((size_t)acc->shared_offset->offset > file->size) {
-      file->size = (size_t)acc->shared_offset->offset;
-   }
    return (ssize_t)count;
 }
 
@@ -347,7 +330,7 @@ int rfs_unlink(const char *pathname) {
          return -1;
       }
    }
-   free(file->data);
+   rfs_file_free_storage(file);
    unsigned index = (unsigned)(file - g_files);
    memset(file, 0, sizeof(ram_file_t));
    g_free_stack[g_free_top++] = index;
@@ -466,7 +449,7 @@ static void free_overwritten_entry(ram_catalog_t *new_entry) {
    if (!new_entry || !new_entry->file) {
       return;
    }
-   free(new_entry->file->data);
+   rfs_file_free_storage(new_entry->file);
    unsigned index = (unsigned)(new_entry->file - g_files);
    memset(new_entry->file, 0, sizeof(ram_file_t));
    g_free_stack[g_free_top++] = index;
@@ -875,24 +858,11 @@ int rfs_ftruncate(rfs_handle_t fd, off_t length) {
    }
    ram_file_t *file = acc->file;
    size_t new_len = (size_t)length;
-   if (new_len > file->capacity) {
-      size_t new_cap = file->capacity == 0 ? RAMFS_INITIAL_CAPACITY : file->capacity * 2;
-      while (new_cap < new_len) {
-         new_cap *= 2;
-      }
-      unsigned char *new_data = realloc(file->data, new_cap);
-      if (!new_data) {
-         acc->error = 1;
-         errno = ENOMEM;
-         return -1;
-      }
-      file->data = new_data;
-      file->capacity = new_cap;
+   if (rfs_file_truncate(file, new_len) != 0) {
+      acc->error = 1;
+      errno = ENOMEM;
+      return -1;
    }
-   if (new_len > file->size) {
-      memset(file->data + file->size, 0, new_len - file->size);
-   }
-   file->size = new_len;
    return 0;
 }
 
@@ -939,23 +909,10 @@ int rfs_truncate(const char *pathname, off_t length) {
       return -1;
    }
    size_t new_len = (size_t)length;
-   if (new_len > file->capacity) {
-      size_t new_cap = file->capacity == 0 ? RAMFS_INITIAL_CAPACITY : file->capacity * 2;
-      while (new_cap < new_len) {
-         new_cap *= 2;
-      }
-      unsigned char *new_data = realloc(file->data, new_cap);
-      if (!new_data) {
-         errno = ENOMEM;
-         return -1;
-      }
-      file->data = new_data;
-      file->capacity = new_cap;
+   if (rfs_file_truncate(file, new_len) != 0) {
+      errno = ENOMEM;
+      return -1;
    }
-   if (new_len > file->size) {
-      memset(file->data + file->size, 0, new_len - file->size);
-   }
-   file->size = new_len;
    return 0;
 }
 

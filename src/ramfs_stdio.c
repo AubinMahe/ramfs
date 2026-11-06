@@ -313,7 +313,7 @@ int rfs_ungetc(int c, FILE *stream) {
       return EOF;
    }
    acc->shared_offset->offset--;
-   acc->file->data[acc->shared_offset->offset] = (unsigned char)c;
+   rfs_file_put_byte(acc->file, (size_t)acc->shared_offset->offset, (unsigned char)c);
    acc->eof = 0;
    return (int)(unsigned char)c;
 }
@@ -341,12 +341,13 @@ int rfs_fgetc(FILE *stream) {
       return EOF;
    }
    ram_file_t *file = acc->file;
-   if (acc->shared_offset->offset >= (off_t)file->size) {
+   int c = rfs_file_get_byte(file, (size_t)acc->shared_offset->offset);
+   if (c < 0) {
       acc->eof = 1;
       return EOF;
    }
-   unsigned char c = file->data[acc->shared_offset->offset++];
-   return (int)c;
+   acc->shared_offset->offset++;
+   return c;
 }
 
 char *rfs_fgets(char *s, int size, FILE *stream) {
@@ -378,8 +379,8 @@ char *rfs_fgets(char *s, int size, FILE *stream) {
    }
    int i = 0;
    while (i < size - 1 && acc->shared_offset->offset < (off_t)file->size) {
-      char c = (char)file->data[acc->shared_offset->offset++];
-      s[i++] = c;
+      int c = rfs_file_get_byte(file, (size_t)acc->shared_offset->offset++);
+      s[i++] = (char)c;
       if (c == '\n') {
          break;
       }
@@ -522,7 +523,7 @@ int rfs_vfscanf(FILE *stream, const char *format, va_list ap) {
       errno = ENOMEM;
       return -1;
    }
-   memcpy(text, file->data + acc->shared_offset->offset, remaining);
+   rfs_file_read_bytes(file, (size_t)acc->shared_offset->offset, text, remaining);
    text[remaining] = '\0';
    size_t fmt_len = strlen(format);
    va_list args;
@@ -700,7 +701,7 @@ ssize_t rfs_getdelim(char **lineptr, size_t *n, int delimiter, FILE *stream) {
 
    size_t read_bytes = 0;
    while (cur_off < (off_t)file->size) {
-      int c = file->data[cur_off++];
+      int c = rfs_file_get_byte(file, (size_t)cur_off++);
       if (read_bytes + 2 > *n) {
          size_t new_n = *n * 2;
          char *new_ptr = realloc(*lineptr, new_n);

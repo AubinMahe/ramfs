@@ -1640,6 +1640,82 @@ static void test_coverage_boost(void) {
    rfs_destroy();
 }
 
+static void test_chunked_storage(void) {
+   rfs_destroy();
+   CHECK(rfs_init(10, 5) == 0);
+
+   /* 1. Écriture multi-blocs (200 000 octets = ~3 blocs de 64 Ko) */
+   size_t total_bytes = 200000;
+   unsigned char *pattern = malloc(total_bytes);
+   CHECK(pattern != NULL);
+   for (size_t i = 0; i < total_bytes; i++) {
+      pattern[i] = (unsigned char)((i * 13 + 7) & 0xFF);
+   }
+
+   rfs_handle_t fd = rfs_open("multi_chunk.dat", O_CREAT | O_RDWR | O_TRUNC, 0644);
+   CHECK(fd >= 0);
+   CHECK(rfs_write(fd, pattern, total_bytes) == (ssize_t)total_bytes);
+
+   /* Vérification par lecture complète */
+   unsigned char *read_buf = malloc(total_bytes);
+   CHECK(read_buf != NULL);
+   CHECK(rfs_lseek(fd, 0, SEEK_SET) == 0);
+   CHECK(rfs_read(fd, read_buf, total_bytes) == (ssize_t)total_bytes);
+   CHECK(memcmp(pattern, read_buf, total_bytes) == 0);
+
+   /* 2. Écriture à cheval sur une frontière de bloc (65536) */
+   size_t boundary = 65536;
+   char cross_data[] = "CROSS_BOUNDARY_CHUNK_DATA_12345";
+   size_t cross_len = strlen(cross_data);
+   CHECK(rfs_lseek(fd, (off_t)(boundary - 10), SEEK_SET) == (off_t)(boundary - 10));
+   CHECK(rfs_write(fd, cross_data, cross_len) == (ssize_t)cross_len);
+
+   char cross_verify[64] = {0};
+   CHECK(rfs_lseek(fd, (off_t)(boundary - 10), SEEK_SET) == (off_t)(boundary - 10));
+   CHECK(rfs_read(fd, cross_verify, cross_len) == (ssize_t)cross_len);
+   CHECK(memcmp(cross_verify, cross_data, cross_len) == 0);
+
+   /* 3. Création de trou (hole) avec lseek au-delà de la fin */
+   size_t hole_target = 300000;
+   CHECK(rfs_lseek(fd, (off_t)hole_target, SEEK_SET) == (off_t)hole_target);
+   CHECK(rfs_write(fd, "HOLE_TAIL", 9) == 9);
+
+   /* Vérification que le trou intermédiaire est rempli de zéros */
+   unsigned char zero_check[256];
+   CHECK(rfs_lseek(fd, (off_t)(total_bytes + 50), SEEK_SET) == (off_t)(total_bytes + 50));
+   CHECK(rfs_read(fd, zero_check, sizeof(zero_check)) == (ssize_t)sizeof(zero_check));
+   for (size_t i = 0; i < sizeof(zero_check); i++) {
+      CHECK(zero_check[i] == 0);
+   }
+
+   /* 4. Troncatures multi-blocs successives */
+   CHECK(rfs_ftruncate(fd, 150000) == 0);
+   struct stat st;
+   CHECK(rfs_fstat(fd, &st) == 0 && st.st_size == 150000);
+
+   /* Troncature à 50 Ko (retourne sous le seuil d'1 bloc) */
+   CHECK(rfs_ftruncate(fd, 50000) == 0);
+   CHECK(rfs_fstat(fd, &st) == 0 && st.st_size == 50000);
+
+   /* Troncature à 0 (libère tous les blocs) */
+   CHECK(rfs_ftruncate(fd, 0) == 0);
+   CHECK(rfs_fstat(fd, &st) == 0 && st.st_size == 0);
+
+   /* Extension par troncature avec remplissage de zéros */
+   CHECK(rfs_ftruncate(fd, 80000) == 0);
+   CHECK(rfs_fstat(fd, &st) == 0 && st.st_size == 80000);
+   CHECK(rfs_lseek(fd, 0, SEEK_SET) == 0);
+   CHECK(rfs_read(fd, zero_check, sizeof(zero_check)) == (ssize_t)sizeof(zero_check));
+   for (size_t i = 0; i < sizeof(zero_check); i++) {
+      CHECK(zero_check[i] == 0);
+   }
+
+   CHECK(rfs_close(fd) == 0);
+   free(pattern);
+   free(read_buf);
+   rfs_destroy();
+}
+
 int main(void) {
    RUN(test_not_initialized);
    RUN(test_open_errors);
@@ -1664,6 +1740,7 @@ int main(void) {
    RUN(test_tmpfile_and_getline);
    RUN(test_hybrid_vfs);
    RUN(test_coverage_boost);
+   RUN(test_chunked_storage);
    {
       int before = g_failures;
       CHECK(test_macros() == 0);

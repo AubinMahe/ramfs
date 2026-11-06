@@ -7,7 +7,9 @@
 #include <stdint.h>
 #include <sys/stat.h>
 
-#define RAMFS_INITIAL_CAPACITY 1024
+#define RAMFS_CHUNK_SHIFT 16
+#define RAMFS_CHUNK_SIZE (1UL << RAMFS_CHUNK_SHIFT) /* 65536 octets = 64 Ko */
+#define RAMFS_CHUNK_MASK (RAMFS_CHUNK_SIZE - 1UL)
 #define MIN_TABLE_SIZE 8
 
 /* =========================================================================
@@ -15,9 +17,11 @@
  * ========================================================================= */
 
 typedef struct {
-   unsigned char *data;
-   size_t size;
-   size_t capacity;
+   unsigned char *first_chunk; /* Premier bloc direct (inlined) évitant l'allocation d'un tableau */
+   unsigned char **chunks;     /* Tableau de pointeurs alloué uniquement si chunks_count > 1 */
+   size_t chunks_count;        /* Nombre de blocs alloués */
+   size_t chunks_capacity;     /* Capacité du tableau de pointeurs chunks */
+   size_t size;                /* Taille logique du fichier en octets */
    int is_dir;
 } ram_file_t;
 
@@ -76,3 +80,12 @@ void remove_from_catalog(size_t i);
 ram_file_access_t *get_access(rfs_handle_t fd);
 int resolve_path(const char *src, char *dst, size_t dst_size);
 void fill_stat_buf(const ram_file_t *file, struct stat *buf);
+
+/* Opérations de stockage paginé (Chunked Storage) */
+unsigned char *rfs_file_get_chunk(const ram_file_t *file, size_t idx);
+size_t rfs_file_read_bytes(const ram_file_t *file, size_t offset, void *buf, size_t count);
+int rfs_file_write_bytes(ram_file_t *file, size_t offset, const void *buf, size_t count);
+int rfs_file_truncate(ram_file_t *file, size_t new_len);
+void rfs_file_free_storage(ram_file_t *file);
+int rfs_file_get_byte(const ram_file_t *file, size_t offset);
+int rfs_file_put_byte(ram_file_t *file, size_t offset, unsigned char c);

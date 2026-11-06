@@ -170,6 +170,40 @@ static const ram_catalog_t **collect_save_entries(const char *const *paths, size
    return entries;
 }
 
+static int write_file_to_gz(gzFile gz, const ram_file_t *file) {
+   size_t off = 0;
+   while (off < file->size) {
+      size_t chunk_idx = off >> RAMFS_CHUNK_SHIFT;
+      size_t chunk_off = off & RAMFS_CHUNK_MASK;
+      size_t chunk_avail = RAMFS_CHUNK_SIZE - chunk_off;
+      size_t remaining = file->size - off;
+      size_t to_write = remaining < chunk_avail ? remaining : chunk_avail;
+      const unsigned char *chunk = rfs_file_get_chunk(file, chunk_idx);
+      if (!chunk || gzwrite(gz, chunk + chunk_off, (unsigned)to_write) != (int)to_write) {
+         return -1;
+      }
+      off += to_write;
+   }
+   return 0;
+}
+
+static int write_file_to_disk(FILE *f, const ram_file_t *file) {
+   size_t off = 0;
+   while (off < file->size) {
+      size_t chunk_idx = off >> RAMFS_CHUNK_SHIFT;
+      size_t chunk_off = off & RAMFS_CHUNK_MASK;
+      size_t chunk_avail = RAMFS_CHUNK_SIZE - chunk_off;
+      size_t remaining = file->size - off;
+      size_t to_write = remaining < chunk_avail ? remaining : chunk_avail;
+      const unsigned char *chunk = rfs_file_get_chunk(file, chunk_idx);
+      if (!chunk || fwrite(chunk + chunk_off, 1, to_write, f) != to_write) {
+         return -1;
+      }
+      off += to_write;
+   }
+   return 0;
+}
+
 /* =========================================================================
  * Exportation d'archives tar.gz et dossiers
  * ========================================================================= */
@@ -211,8 +245,8 @@ int rfs_save_archive(const char *archive_path, const char *const *paths, size_t 
       if (file->is_dir) {
          continue;
       }
-      if (file->size > 0 && file->data != NULL) {
-         if (gzwrite(gz, file->data, (unsigned)file->size) != (int)file->size) {
+      if (file->size > 0) {
+         if (write_file_to_gz(gz, file) != 0) {
             if (errno == 0) {
                errno = EIO;
             }
@@ -289,8 +323,8 @@ int rfs_save_dir(const char *dest_dir, const char *const *paths, size_t path_cou
          free(entries);
          return -1;
       }
-      if (file->size > 0 && file->data != NULL) {
-         if (fwrite(file->data, 1, file->size, f) != file->size) {
+      if (file->size > 0) {
+         if (write_file_to_disk(f, file) != 0) {
             if (errno == 0) {
                errno = EIO;
             }

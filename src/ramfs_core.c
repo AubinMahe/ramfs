@@ -45,6 +45,35 @@ unsigned g_peak_access = 0;
 static unsigned g_max_depth = 0;
 static unsigned g_depth_counts[64];
 
+/* Pool de recyclage des blocs mémoires fixes (Chunked Storage) */
+static unsigned char **g_chunk_pool = NULL;
+static size_t g_chunk_pool_top = 0;
+static size_t g_chunk_pool_capacity = 0;
+
+static unsigned char *allocate_chunk(void) {
+   if (g_chunk_pool_top > 0) {
+      return g_chunk_pool[--g_chunk_pool_top];
+   }
+   return malloc(RAMFS_CHUNK_SIZE);
+}
+
+static void release_chunk(unsigned char *chunk) {
+   if (!chunk) {
+      return;
+   }
+   if (g_chunk_pool_top >= g_chunk_pool_capacity) {
+      size_t new_cap = g_chunk_pool_capacity ? g_chunk_pool_capacity * 2 : 64;
+      unsigned char **new_pool = realloc(g_chunk_pool, new_cap * sizeof(unsigned char *));
+      if (!new_pool) {
+         free(chunk);
+         return;
+      }
+      g_chunk_pool = new_pool;
+      g_chunk_pool_capacity = new_cap;
+   }
+   g_chunk_pool[g_chunk_pool_top++] = chunk;
+}
+
 static unsigned count_slashes(const char *s) {
    unsigned n = 0;
    while (*s) {
@@ -125,17 +154,15 @@ ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
       return NULL;
    }
    char *path_copy = strdup(path);
-   unsigned char *data = calloc(1, RAMFS_INITIAL_CAPACITY);
-   if (!path_copy || !data) {
-      free(path_copy);
-      free(data);
+   if (!path_copy) {
       errno = ENOMEM;
       return NULL;
    }
    ram_file_t *file = g_files + g_free_stack[--g_free_top];
-   file->data = data;
+   file->chunks = NULL;
+   file->chunks_count = 0;
+   file->chunks_capacity = 0;
    file->size = 0;
-   file->capacity = RAMFS_INITIAL_CAPACITY;
    file->is_dir = 0;
    size_t i = hash & g_table_mask;
    while (g_table[i].path != NULL) {
@@ -164,9 +191,10 @@ ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash) {
       return NULL;
    }
    ram_file_t *file = g_files + g_free_stack[--g_free_top];
-   file->data = NULL;
+   file->chunks = NULL;
+   file->chunks_count = 0;
+   file->chunks_capacity = 0;
    file->size = 0;
-   file->capacity = 0;
    file->is_dir = 1;
    size_t i = hash & g_table_mask;
    while (g_table[i].path != NULL) {
@@ -388,6 +416,222 @@ int resolve_path(const char *src, char *dst, size_t dst_size) {
    return rfs_normalize_path(src, dst, dst_size);
 }
 
+/* =========================================================================
+ * Opérations de stockage paginé (Chunked Storage)
+ * ========================================================================= */
+
+unsigned char *rfs_file_get_chunk(const ram_file_t *file, size_t idx) {
+   if (!file || idx >= file->chunks_count) {
+      return NULL;
+   }
+   if (idx == 0) {
+      return file->first_chunk;
+   }
+   return file->chunks ? file->chunks[idx] : NULL;
+}
+
+void rfs_file_free_storage(ram_file_t *file) {
+   if (!file) {
+      return;
+   }
+   if (file->first_chunk) {
+      release_chunk(file->first_chunk);
+      file->first_chunk = NULL;
+   }
+   if (file->chunks) {
+      for (size_t i = 1; i < file->chunks_count; i++) {
+         release_chunk(file->chunks[i]);
+      }
+      free(file->chunks);
+      file->chunks = NULL;
+   }
+   file->chunks_count = 0;
+   file->chunks_capacity = 0;
+   file->size = 0;
+}
+
+static int rfs_file_ensure_capacity(ram_file_t *file, size_t needed_size) {
+   if (needed_size == 0) {
+      return 0;
+   }
+   size_t needed_chunks = (needed_size + RAMFS_CHUNK_SIZE - 1) >> RAMFS_CHUNK_SHIFT;
+   if (needed_chunks <= file->chunks_count) {
+      return 0;
+   }
+   if (file->chunks_count == 0) {
+      unsigned char *c = allocate_chunk();
+      if (!c) {
+         errno = ENOMEM;
+         return -1;
+      }
+      file->first_chunk = c;
+      file->chunks_count = 1;
+   }
+   if (needed_chunks <= 1) {
+      return 0;
+   }
+   if (needed_chunks > file->chunks_capacity) {
+      size_t new_cap = file->chunks_capacity ? file->chunks_capacity * 2 : 4;
+      while (new_cap < needed_chunks) {
+         new_cap *= 2;
+      }
+      unsigned char **new_chunks = realloc(file->chunks, new_cap * sizeof(unsigned char *));
+      if (!new_chunks) {
+         errno = ENOMEM;
+         return -1;
+      }
+      if (file->chunks == NULL) {
+         new_chunks[0] = file->first_chunk;
+      }
+      file->chunks = new_chunks;
+      file->chunks_capacity = new_cap;
+   }
+   while (file->chunks_count < needed_chunks) {
+      unsigned char *c = allocate_chunk();
+      if (!c) {
+         errno = ENOMEM;
+         return -1;
+      }
+      file->chunks[file->chunks_count++] = c;
+   }
+   return 0;
+}
+
+static void rfs_file_zero_range(ram_file_t *file, size_t start, size_t end) {
+   size_t cur = start;
+   while (cur < end) {
+      size_t chunk_idx = cur >> RAMFS_CHUNK_SHIFT;
+      size_t chunk_off = cur & RAMFS_CHUNK_MASK;
+      size_t chunk_avail = RAMFS_CHUNK_SIZE - chunk_off;
+      size_t to_zero = (end - cur) < chunk_avail ? (end - cur) : chunk_avail;
+      unsigned char *chunk = rfs_file_get_chunk(file, chunk_idx);
+      if (chunk) {
+         memset(chunk + chunk_off, 0, to_zero);
+      }
+      cur += to_zero;
+   }
+}
+
+size_t rfs_file_read_bytes(const ram_file_t *file, size_t offset, void *buf, size_t count) {
+   if (!file || !buf || count == 0 || offset >= file->size) {
+      return 0;
+   }
+   size_t available = file->size - offset;
+   size_t to_read = count < available ? count : available;
+   size_t read_bytes = 0;
+   char *dst = (char *)buf;
+   while (read_bytes < to_read) {
+      size_t cur = offset + read_bytes;
+      size_t chunk_idx = cur >> RAMFS_CHUNK_SHIFT;
+      size_t chunk_off = cur & RAMFS_CHUNK_MASK;
+      size_t chunk_avail = RAMFS_CHUNK_SIZE - chunk_off;
+      size_t n = (to_read - read_bytes) < chunk_avail ? (to_read - read_bytes) : chunk_avail;
+      const unsigned char *chunk = rfs_file_get_chunk(file, chunk_idx);
+      if (chunk) {
+         memcpy(dst + read_bytes, chunk + chunk_off, n);
+      }
+      read_bytes += n;
+   }
+   return read_bytes;
+}
+
+int rfs_file_write_bytes(ram_file_t *file, size_t offset, const void *buf, size_t count) {
+   if (!file || (!buf && count > 0)) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (count == 0) {
+      return 0;
+   }
+   size_t target_end = offset + count;
+   if (target_end > file->size) {
+      if (rfs_file_ensure_capacity(file, target_end) != 0) {
+         return -1;
+      }
+      if (offset > file->size) {
+         rfs_file_zero_range(file, file->size, offset);
+      }
+   }
+   size_t written = 0;
+   const char *src = (const char *)buf;
+   while (written < count) {
+      size_t cur = offset + written;
+      size_t chunk_idx = cur >> RAMFS_CHUNK_SHIFT;
+      size_t chunk_off = cur & RAMFS_CHUNK_MASK;
+      size_t chunk_avail = RAMFS_CHUNK_SIZE - chunk_off;
+      size_t n = (count - written) < chunk_avail ? (count - written) : chunk_avail;
+      unsigned char *chunk = rfs_file_get_chunk(file, chunk_idx);
+      if (chunk) {
+         memcpy(chunk + chunk_off, src + written, n);
+      }
+      written += n;
+   }
+   if (target_end > file->size) {
+      file->size = target_end;
+   }
+   return 0;
+}
+
+int rfs_file_truncate(ram_file_t *file, size_t new_len) {
+   if (!file) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (new_len == file->size) {
+      return 0;
+   }
+   if (new_len > file->size) {
+      if (rfs_file_ensure_capacity(file, new_len) != 0) {
+         return -1;
+      }
+      rfs_file_zero_range(file, file->size, new_len);
+      file->size = new_len;
+      return 0;
+   }
+   size_t needed_chunks = (new_len + RAMFS_CHUNK_SIZE - 1) >> RAMFS_CHUNK_SHIFT;
+   while (file->chunks_count > needed_chunks) {
+      size_t idx = --file->chunks_count;
+      if (idx == 0) {
+         release_chunk(file->first_chunk);
+         file->first_chunk = NULL;
+      } else if (file->chunks) {
+         release_chunk(file->chunks[idx]);
+         file->chunks[idx] = NULL;
+      }
+   }
+   if (needed_chunks <= 1 && file->chunks != NULL) {
+      free(file->chunks);
+      file->chunks = NULL;
+      file->chunks_capacity = 0;
+   }
+   file->size = new_len;
+   return 0;
+}
+
+int rfs_file_get_byte(const ram_file_t *file, size_t offset) {
+   if (!file || offset >= file->size) {
+      return -1;
+   }
+   size_t chunk_idx = offset >> RAMFS_CHUNK_SHIFT;
+   size_t chunk_off = offset & RAMFS_CHUNK_MASK;
+   const unsigned char *chunk = rfs_file_get_chunk(file, chunk_idx);
+   return chunk ? (int)chunk[chunk_off] : -1;
+}
+
+int rfs_file_put_byte(ram_file_t *file, size_t offset, unsigned char c) {
+   if (!file || offset >= file->size) {
+      return -1;
+   }
+   size_t chunk_idx = offset >> RAMFS_CHUNK_SHIFT;
+   size_t chunk_off = offset & RAMFS_CHUNK_MASK;
+   unsigned char *chunk = rfs_file_get_chunk(file, chunk_idx);
+   if (!chunk) {
+      return -1;
+   }
+   chunk[chunk_off] = c;
+   return 0;
+}
+
 void fill_stat_buf(const ram_file_t *file, struct stat *buf) {
    memset(buf, 0, sizeof(struct stat));
    if (file && file->is_dir) {
@@ -461,7 +705,7 @@ void rfs_destroy(void) {
    }
    if (g_files) {
       for (unsigned i = 0; i < g_files_capacity; i++) {
-         free(g_files[i].data);
+         rfs_file_free_storage(g_files + i);
       }
       free(g_files);
    }
@@ -478,6 +722,15 @@ void rfs_destroy(void) {
          }
       }
       free(g_access_table);
+   }
+   if (g_chunk_pool) {
+      for (size_t i = 0; i < g_chunk_pool_top; i++) {
+         free(g_chunk_pool[i]);
+      }
+      free(g_chunk_pool);
+      g_chunk_pool = NULL;
+      g_chunk_pool_top = 0;
+      g_chunk_pool_capacity = 0;
    }
    snprintf(g_cwd, sizeof(g_cwd), "/");
    rfs_unmount();

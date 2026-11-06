@@ -15,8 +15,6 @@ endif
 SRC_LIB     := src/ramfs_core.c src/ramfs_vfs.c src/ramfs_posix.c src/ramfs_stdio.c src/ramfs_archive.c
 HDR         := inc/ramfs.h src/ramfs_core.h src/ramfs_vfs.h
 TESTS       := test/main.c test/test_macros.c
-BENCH       := test/benchmark.c
-BENCH_RAM   := test/benchmark-ramfs-only.c
 PERF_SUITE  := test/perf_benchmark.c
 EXTRA       ?=
 MEASURES    ?=
@@ -32,12 +30,10 @@ B_DBG       := build_valgrind
 B_PERF      := build_perf
 B_COV       := build_coverage
 ALL_DIRS    := build_linux build_linux_debug build_win build_win_debug $(B_ASAN) $(B_DBG) $(B_PERF) $(B_COV)
-BENCH_LINUX := $(BUILD_LINUX)/benchmark
-BENCH_WIN   := $(BUILD_WIN)/benchmark.exe
 PERF_BIN    := $(BUILD_LINUX)/perf_benchmark
 PERF_WIN    := $(BUILD_WIN)/perf_benchmark.exe
 
-.PHONY: all linux windows win clean help test test_linux test_win bench bench_linux bench_win check asan valgrind efence perf callgrind format-sources complexity metrics coverage lcov gcov
+.PHONY: all linux windows win clean help test test_linux test_win bench check asan valgrind efence perf callgrind format-sources complexity metrics coverage lcov gcov
 
 all: linux windows
 
@@ -56,9 +52,6 @@ $(BUILD_LINUX)/libramfs.so: $(SRC_LIB) $(HDR)
 $(BUILD_LINUX)/test_ramfs: $(TESTS) $(HDR) $(BUILD_LINUX)/libramfs.so
 	$(CC_LINUX) $(CFLAGS) -MMD -MT $@ -MF $@.d -o $@ $(TESTS) -L$(BUILD_LINUX) -lramfs -Wl,-rpath,'$$ORIGIN'
 
-$(BENCH_LINUX): $(BENCH) $(HDR) $(BUILD_LINUX)/libramfs.so
-	$(CC_LINUX) $(CFLAGS) -MMD -MT $@ -MF $@.d -o $@ $(BENCH) -L$(BUILD_LINUX) -lramfs -Wl,-rpath,'$$ORIGIN'
-
 $(PERF_BIN): $(PERF_SUITE) $(HDR) $(BUILD_LINUX)/libramfs.so
 	$(CC_LINUX) $(CFLAGS) -MMD -MT $@ -MF $@.d -o $@ $(PERF_SUITE) -L$(BUILD_LINUX) -lramfs -Wl,-rpath,'$$ORIGIN'
 
@@ -68,10 +61,7 @@ test_linux: $(BUILD_LINUX)/test_ramfs
 bench: $(PERF_BIN)
 	./$<
 
-bench_linux: $(BENCH_LINUX)
-	./$<
-
-windows: $(BUILD_WIN)/ramfs.dll $(BUILD_WIN)/test_ramfs.exe $(BENCH_WIN) $(PERF_WIN)
+windows: $(BUILD_WIN)/ramfs.dll $(BUILD_WIN)/test_ramfs.exe $(PERF_WIN)
 
 $(BUILD_WIN)/ramfs.dll: $(SRC_LIB) $(HDR)
 	@mkdir -p $(@D)
@@ -80,10 +70,6 @@ $(BUILD_WIN)/ramfs.dll: $(SRC_LIB) $(HDR)
 $(BUILD_WIN)/test_ramfs.exe: $(TESTS) $(BUILD_WIN)/ramfs.dll
 	$(call say,WIN-CC,$@)
 	$(CC_WIN) $(CFLAGS) -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(TESTS) -L$(BUILD_WIN) -lramfs
-
-$(BENCH_WIN): $(BENCH) $(BUILD_WIN)/ramfs.dll
-	$(call say,WIN-CC,$@)
-	$(CC_WIN) $(CFLAGS) -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(BENCH) -L$(BUILD_WIN) -lramfs
 
 $(PERF_WIN): $(PERF_SUITE) $(BUILD_WIN)/ramfs.dll
 	$(call say,WIN-CC,$@)
@@ -121,27 +107,18 @@ efence: $(B_DBG)/test_ramfs_ef
 
 check: test_linux asan valgrind efence
 
-$(B_PERF)/benchmark: $(SRC_LIB) $(BENCH) $(HDR)
+$(B_PERF)/perf_benchmark: $(SRC_LIB) $(PERF_SUITE) $(HDR)
 	@mkdir -p $(@D)
-	$(CC_LINUX) $(QA_CFLAGS) $(if $(MEASURES),-DMEASURES=$(MEASURES)) -O2 -DNDEBUG -g -fno-omit-frame-pointer -o $@ $(BENCH) $(SRC_LIB) $(QA_LDLIBS)
+	$(CC_LINUX) $(QA_CFLAGS) $(if $(MEASURES),-DMEASURES=$(MEASURES)) -O2 -DNDEBUG -g -fno-omit-frame-pointer -o $@ $(PERF_SUITE) $(SRC_LIB) $(QA_LDLIBS)
 
-perf: $(B_PERF)/benchmark
+perf: $(B_PERF)/perf_benchmark
 	perf stat -e task-clock,page-faults,context-switches ./$<
 	perf record -F 2999 --call-graph fp -o $(B_PERF)/perf.data -- ./$<
 	perf report -i $(B_PERF)/perf.data --stdio --no-children --percent-limit 2 | head -70
 
-callgrind: $(B_PERF)/benchmark
+callgrind: $(B_PERF)/perf_benchmark
 	valgrind --tool=callgrind --callgrind-out-file=$(B_PERF)/callgrind.out ./$<
 	callgrind_annotate $(B_PERF)/callgrind.out | head -40
-
-$(B_PERF)/benchmark-ramfs-only: $(SRC_LIB) $(BENCH_RAM) $(HDR)
-	@mkdir -p $(@D)
-	$(CC_LINUX) $(QA_CFLAGS) $(if $(MEASURES),-DMEASURES=$(MEASURES)) -O2 -DNDEBUG -g -fno-omit-frame-pointer -o $@ $(BENCH_RAM) $(SRC_LIB) $(QA_LDLIBS)
-
-perf-ramfs-only: $(B_PERF)/benchmark-ramfs-only
-	perf stat -e task-clock,page-faults,context-switches ./$<
-	perf record -F 2999 --call-graph fp -o $(B_PERF)/perf.data -- ./$<
-	perf report -i $(B_PERF)/perf.data --stdio --no-children --percent-limit 2 | head -70
 
 COMPLEXITY_LIMIT ?= 25
 
