@@ -110,9 +110,16 @@ sudo dnf install -y gcc make zlib-devel mingw64-gcc mingw64-zlib valgrind wine
 | `make valgrind` | Analyse approfondie des fuites mémoire et accès invalides via Valgrind |
 | `make efence` | Traque des dépassements de tampons mémoires via Electric Fence |
 | `make perf` | Mesure des compteurs matériels et profilage CPU via Linux `perf` |
+| `make complexity` | Analyse de complexité cyclomatique via `pmccabe` (seuil par défaut CCN < 25) |
+| `make gcov` | Mesure rapide de la couverture de test en console par module |
+| `make coverage` | Mesure complète de couverture via `lcov`/`genhtml` (lignes, fonctions, branches, rapport HTML) |
 | `make format-sources`| Formate l'ensemble des sources (`.c`, `.h`) selon `.clang-format` |
 | `make clean` | Nettoie tous les répertoires de compilation |
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE.txt](LICENSE.txt).
+
+## Outils associés pour la qualité du code
+
+`sudo apt install pmccabe lcov`

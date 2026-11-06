@@ -1,0 +1,487 @@
+#include "ramfs_core.h"
+#include "ramfs_vfs.h"
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+
+#if defined(__x86_64__) || defined(_M_X64)
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC target("sse4.2")
+#endif
+#include <smmintrin.h>
+#endif
+
+/* =========================================================================
+ * Variables globales du noyau (Core)
+ * ========================================================================= */
+
+/* Pool de fichiers + pile des indices libres */
+ram_file_t *g_files = NULL;
+unsigned *g_free_stack = NULL;
+unsigned g_free_top = 0;
+unsigned g_files_capacity = 0;
+
+/* Table de hachage : adressage ouvert, sondage linéaire, taille = puissance de 2,
+   suppression par décalage arrière (pas de tombstones). */
+ram_catalog_t *g_table = NULL;
+size_t g_table_mask = 0;
+
+/* Table des descripteurs d'accès ouverts */
+ram_file_access_t *g_access_table = NULL;
+unsigned g_access_capacity = 0;
+
+/* Statistiques et jauges de crête */
+unsigned g_files_used = 0;
+unsigned g_peak_files = 0;
+unsigned g_access_used = 0;
+unsigned g_peak_access = 0;
+
+/* =========================================================================
+ * Fonctions de hachage et de gestion du catalogue
+ * ========================================================================= */
+
+size_t hash_path(const char *s) {
+#if defined(__x86_64__) || defined(_M_X64)
+   uint64_t crc = 0xFFFFFFFF;
+   size_t len = strlen(s);
+   size_t chunks = len / 8;
+   for (size_t i = 0; i < chunks; i++) {
+      uint64_t v;
+      memcpy(&v, s + i * 8, sizeof(v));
+      crc = _mm_crc32_u64(crc, v);
+   }
+   for (size_t i = chunks * 8; i < len; i++) {
+      crc = _mm_crc32_u8((uint32_t)crc, (unsigned char)s[i]);
+   }
+   return (size_t)crc;
+#else
+   uint64_t h = 1469598103934665603ULL;
+   for (; *s; s++) {
+      h ^= (unsigned char)*s;
+      h *= 1099511628211ULL;
+   }
+   return (size_t)h;
+#endif
+}
+
+ram_catalog_t *search_in_catalog(const char *path, size_t hash) {
+   if (!g_table) {
+      return NULL;
+   }
+   size_t i = hash & g_table_mask;
+   while (g_table[i].path != NULL) {
+      if (g_table[i].hash == hash && strcmp(g_table[i].path, path) == 0) {
+         return g_table + i;
+      }
+      i = (i + 1) & g_table_mask;
+   }
+   return NULL;
+}
+
+ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
+   if (g_free_top == 0) {
+      fprintf(stderr, "Capacité du catalogue atteinte !\n");
+      errno = ENOMEM;
+      return NULL;
+   }
+   char *path_copy = strdup(path);
+   unsigned char *data = calloc(1, RAMFS_INITIAL_CAPACITY);
+   if (!path_copy || !data) {
+      free(path_copy);
+      free(data);
+      errno = ENOMEM;
+      return NULL;
+   }
+   ram_file_t *file = g_files + g_free_stack[--g_free_top];
+   file->data = data;
+   file->size = 0;
+   file->capacity = RAMFS_INITIAL_CAPACITY;
+   file->is_dir = 0;
+   size_t i = hash & g_table_mask;
+   while (g_table[i].path != NULL) {
+      i = (i + 1) & g_table_mask;
+   }
+   g_table[i].path = path_copy;
+   g_table[i].file = file;
+   g_table[i].hash = hash;
+   g_files_used++;
+   if (g_files_used > g_peak_files) {
+      g_peak_files = g_files_used;
+   }
+   return g_table + i;
+}
+
+ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash) {
+   if (g_free_top == 0) {
+      fprintf(stderr, "Capacité du catalogue atteinte !\n");
+      errno = ENOMEM;
+      return NULL;
+   }
+   char *path_copy = strdup(path);
+   if (!path_copy) {
+      errno = ENOMEM;
+      return NULL;
+   }
+   ram_file_t *file = g_files + g_free_stack[--g_free_top];
+   file->data = NULL;
+   file->size = 0;
+   file->capacity = 0;
+   file->is_dir = 1;
+   size_t i = hash & g_table_mask;
+   while (g_table[i].path != NULL) {
+      i = (i + 1) & g_table_mask;
+   }
+   g_table[i].path = path_copy;
+   g_table[i].file = file;
+   g_table[i].hash = hash;
+   g_files_used++;
+   if (g_files_used > g_peak_files) {
+      g_peak_files = g_files_used;
+   }
+   return g_table + i;
+}
+
+int is_dir_prefix(const char *clean_path) {
+   if (!g_table) {
+      return 0;
+   }
+   size_t len = strlen(clean_path);
+   for (size_t i = 0; i <= g_table_mask; i++) {
+      const ram_catalog_t *e = g_table + i;
+      if (e->path != NULL && e->file != NULL) {
+         if (strncmp(e->path, clean_path, len) == 0 && e->path[len] == '/') {
+            return 1;
+         }
+      }
+   }
+   return 0;
+}
+
+/* Retire l'entrée à l'index i en conservant la validité des chaînes de sondage. */
+void remove_from_catalog(size_t i) {
+   size_t j = i;
+   for (;;) {
+      j = (j + 1) & g_table_mask;
+      if (g_table[j].path == NULL) {
+         break;
+      }
+      size_t k = g_table[j].hash & g_table_mask; /* position idéale de j */
+      /* j peut être déplacé en i si k n'est pas cycliquement dans ]i, j] */
+      int movable = (i <= j) ? (k <= i || k > j) : (k <= i && k > j);
+      if (movable) {
+         g_table[i] = g_table[j];
+         i = j;
+      }
+   }
+   memset(g_table + i, 0, sizeof(ram_catalog_t));
+}
+
+/* Renvoie l'accès pour un handle valide et ouvert, sinon NULL (errno = EBADF). */
+ram_file_access_t *get_access(rfs_handle_t fd) {
+   if ((g_files == NULL) || (g_access_table == NULL)) {
+      errno = ENODEV;
+      return NULL;
+   }
+   if (fd < 0 || !is_rfs_fd(fd)) {
+      errno = EBADF;
+      return NULL;
+   }
+   unsigned slot = fd_to_slot(fd);
+   if (g_access_table[slot].file == NULL) {
+      errno = EBADF;
+      return NULL;
+   }
+   return g_access_table + slot;
+}
+
+/* =========================================================================
+ * Normalisation et résolution des chemins
+ * ========================================================================= */
+
+static int handle_dotdot_component(char *dst, size_t *dst_idx, size_t root_idx, int is_absolute, size_t dst_size) {
+   if (*dst_idx > root_idx) {
+      size_t prev = *dst_idx - 1;
+      while (prev > root_idx && dst[prev] != '/') {
+         prev--;
+      }
+      *dst_idx = (dst[prev] == '/' && prev > root_idx) ? prev : root_idx;
+   } else if (!is_absolute) {
+      if (*dst_idx > root_idx) {
+         if (*dst_idx + 1 >= dst_size) {
+            errno = ENAMETOOLONG;
+            return -1;
+         }
+         dst[(*dst_idx)++] = '/';
+      }
+      if (*dst_idx + 2 >= dst_size) {
+         errno = ENAMETOOLONG;
+         return -1;
+      }
+      dst[(*dst_idx)++] = '.';
+      dst[(*dst_idx)++] = '.';
+   }
+   return 0;
+}
+
+static int append_path_component(char *dst, size_t *dst_idx, size_t root_idx, const char *comp_start, size_t comp_len,
+                                 size_t dst_size) {
+   if (*dst_idx > root_idx && dst[*dst_idx - 1] != '/') {
+      if (*dst_idx + 1 >= dst_size) {
+         errno = ENAMETOOLONG;
+         return -1;
+      }
+      dst[(*dst_idx)++] = '/';
+   }
+   if (*dst_idx + comp_len >= dst_size) {
+      errno = ENAMETOOLONG;
+      return -1;
+   }
+   memcpy(dst + *dst_idx, comp_start, comp_len);
+   *dst_idx += comp_len;
+   return 0;
+}
+
+static inline int is_path_separator(char c) { return c == '/' || c == '\\'; }
+
+static int parse_root_prefix(const char *src, size_t *src_idx, char *dst, size_t *dst_idx) {
+   /* Lettre de lecteur Windows éventuelle (ex: "C:" ou "c:\") */
+   if (isalpha((unsigned char)src[0]) && src[1] == ':') {
+      dst[(*dst_idx)++] = (char)toupper((unsigned char)src[0]);
+      dst[(*dst_idx)++] = ':';
+      *src_idx = 2;
+   }
+
+   int is_absolute = is_path_separator(src[*src_idx]);
+   if (is_absolute) {
+      dst[(*dst_idx)++] = '/';
+      *src_idx = (size_t)(skip_slashes(src + *src_idx) - src);
+   }
+   return is_absolute;
+}
+
+int rfs_normalize_path(const char *src, char *dst, size_t dst_size) {
+   if (!src || !dst || dst_size == 0) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (src[0] == '\0') {
+      dst[0] = '\0';
+      return 0;
+   }
+   size_t len = strlen(src);
+   if (len >= dst_size) {
+      errno = ENAMETOOLONG;
+      return -1;
+   }
+
+   size_t src_idx = 0;
+   size_t dst_idx = 0;
+   int is_absolute = parse_root_prefix(src, &src_idx, dst, &dst_idx);
+   size_t root_idx = dst_idx;
+
+   while (src[src_idx] != '\0') {
+      src_idx = (size_t)(skip_slashes(src + src_idx) - src);
+      if (src[src_idx] == '\0') {
+         break;
+      }
+      const char *comp_start = src + src_idx;
+      while (src[src_idx] != '\0' && !is_path_separator(src[src_idx])) {
+         src_idx++;
+      }
+      size_t comp_len = (size_t)(src + src_idx - comp_start);
+
+      /* Composant "." ignoré */
+      if (comp_len == 1 && comp_start[0] == '.') {
+         continue;
+      }
+
+      /* Composant ".." */
+      if (comp_len == 2 && comp_start[0] == '.' && comp_start[1] == '.') {
+         if (handle_dotdot_component(dst, &dst_idx, root_idx, is_absolute, dst_size) != 0) {
+            return -1;
+         }
+         continue;
+      }
+
+      /* Composant normal */
+      if (append_path_component(dst, &dst_idx, root_idx, comp_start, comp_len, dst_size) != 0) {
+         return -1;
+      }
+   }
+
+   if (dst_idx == 0) {
+      dst[dst_idx++] = '.';
+   }
+   dst[dst_idx] = '\0';
+   return 0;
+}
+
+int resolve_path(const char *src, char *dst, size_t dst_size) {
+   if (!src || !dst || dst_size == 0) {
+      errno = EINVAL;
+      return -1;
+   }
+   int is_absolute = (src[0] == '/' || src[0] == '\\' || (isalpha((unsigned char)src[0]) && src[1] == ':'));
+   if (!is_absolute && g_cwd[0] != '\0' && strcmp(g_cwd, "/") != 0 && strcmp(g_cwd, ".") != 0) {
+      char combined[PATH_MAX * 2];
+      const char *cwd_sub = (g_cwd[0] == '/') ? g_cwd + 1 : g_cwd;
+      if (cwd_sub[0] != '\0') {
+         int ret = snprintf(combined, sizeof(combined), "%s/%s", cwd_sub, src);
+         if (ret < 0 || (size_t)ret >= sizeof(combined)) {
+            errno = ENAMETOOLONG;
+            return -1;
+         }
+         return rfs_normalize_path(combined, dst, dst_size);
+      }
+   }
+   return rfs_normalize_path(src, dst, dst_size);
+}
+
+void fill_stat_buf(const ram_file_t *file, struct stat *buf) {
+   memset(buf, 0, sizeof(struct stat));
+   if (file && file->is_dir) {
+      buf->st_mode = S_IFDIR | 0755;
+      buf->st_size = 0;
+      buf->st_nlink = 2;
+   } else {
+      buf->st_mode = S_IFREG | 0644;
+      buf->st_size = file ? (off_t)file->size : 0;
+      buf->st_nlink = 1;
+   }
+#if defined(__linux__) || defined(__unix__)
+   buf->st_blksize = 4096;
+   buf->st_blocks = (buf->st_size + 511) / 512;
+#endif
+   time_t now = time(NULL);
+   buf->st_atime = now;
+   buf->st_mtime = now;
+   buf->st_ctime = now;
+}
+
+/* =========================================================================
+ * Initialisation, destruction et statistiques
+ * ========================================================================= */
+
+int rfs_init(unsigned files_count, unsigned access_count) {
+   rfs_destroy();
+   size_t table_size = MIN_TABLE_SIZE;
+   while (table_size < (size_t)files_count * 2) {
+      table_size *= 2; /* facteur de charge <= 0,5 */
+   }
+   g_files = calloc(files_count ? files_count : 1, sizeof(ram_file_t));
+   g_free_stack = malloc((files_count ? files_count : 1) * sizeof(unsigned));
+   g_table = calloc(table_size, sizeof(ram_catalog_t));
+   g_access_table = calloc(access_count ? access_count : 1, sizeof(ram_file_access_t));
+   if ((g_files == NULL) || (g_free_stack == NULL) || (g_table == NULL) || (g_access_table == NULL)) {
+      errno = ENOMEM;
+      rfs_destroy();
+      return -1;
+   }
+   g_files_capacity = files_count;
+   g_table_mask = table_size - 1;
+   g_access_capacity = access_count;
+   g_files_used = 0;
+   g_peak_files = 0;
+   g_access_used = 0;
+   g_peak_access = 0;
+   snprintf(g_cwd, sizeof(g_cwd), "/");
+   const char *env_mount = getenv("RAMFS_MOUNT_PREFIX");
+   if (env_mount && env_mount[0] != '\0') {
+      rfs_mount(env_mount);
+   } else {
+      rfs_unmount();
+   }
+   /* indices poussés en ordre décroissant : le 0 sort en premier */
+   for (unsigned i = 0; i < files_count; i++) {
+      g_free_stack[i] = files_count - 1 - i;
+   }
+   g_free_top = files_count;
+   return 0;
+}
+
+void rfs_destroy(void) {
+   if (g_table) {
+      for (size_t i = 0; i <= g_table_mask; i++) {
+         free(g_table[i].path);
+      }
+      free(g_table);
+   }
+   if (g_files) {
+      for (unsigned i = 0; i < g_files_capacity; i++) {
+         free(g_files[i].data);
+      }
+      free(g_files);
+   }
+   if (g_free_stack) {
+      free(g_free_stack);
+   }
+   if (g_access_table) {
+      for (unsigned i = 0; i < g_access_capacity; i++) {
+         if (g_access_table[i].shared_offset) {
+            if (--g_access_table[i].shared_offset->ref_count == 0) {
+               free(g_access_table[i].shared_offset);
+            }
+            g_access_table[i].shared_offset = NULL;
+         }
+      }
+      free(g_access_table);
+   }
+   snprintf(g_cwd, sizeof(g_cwd), "/");
+   rfs_unmount();
+   g_table = NULL;
+   g_table_mask = 0;
+   g_files = NULL;
+   g_free_stack = NULL;
+   g_free_top = 0;
+   g_files_capacity = 0;
+   g_access_table = NULL;
+   g_access_capacity = 0;
+   g_files_used = 0;
+   g_peak_files = 0;
+   g_access_used = 0;
+   g_peak_access = 0;
+}
+
+int rfs_get_stats(rfs_stats_t *stats) {
+   if (!stats) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (!g_files || !g_access_table) {
+      errno = ENODEV;
+      return -1;
+   }
+   stats->files_used = g_files_used;
+   stats->peak_files = g_peak_files;
+   stats->files_capacity = g_files_capacity;
+   stats->access_used = g_access_used;
+   stats->peak_access = g_peak_access;
+   stats->access_capacity = g_access_capacity;
+   return 0;
+}
+
+#ifndef RAMFS_VERSION
+#define RAMFS_VERSION "unknown"
+#endif
+
+const char *rfs_version(void) { return RAMFS_VERSION; }
+
+void rfs_dump_stats(FILE *stream) {
+   FILE *out = stream ? stream : stderr;
+   rfs_stats_t st;
+   if (rfs_get_stats(&st) != 0) {
+      fprintf(out, "ramfile: non initialisé (version %s)\n", rfs_version());
+      return;
+   }
+   double files_pct = st.files_capacity ? ((double)st.peak_files * 100.0 / (double)st.files_capacity) : 0.0;
+   double access_pct = st.access_capacity ? ((double)st.peak_access * 100.0 / (double)st.access_capacity) : 0.0;
+   fprintf(out, "=== Statistiques ramfs (%s) ===\n", rfs_version());
+   fprintf(out, "Fichiers : actuel %u, pic %u / %u (%.1f%%)\n", st.files_used, st.peak_files, st.files_capacity, files_pct);
+   fprintf(out, "Accès    : actuel %u, pic %u / %u (%.1f%%)\n", st.access_used, st.peak_access, st.access_capacity, access_pct);
+   fprintf(out, "============================\n");
+}

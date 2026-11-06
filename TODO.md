@@ -121,3 +121,43 @@ Fonctions implémentées et redirigées :
   - *Comportement :* Réduction immédiate ou extension de capacité comblée par des octets nuls (`0x00`), par handle ou par chemin.
 - [x] **Flux étendus stdio : `tmpfile`, `getline`, `getdelim`** :
   - *Comportement :* `tmpfile` alloue un flux temporaire en mémoire automatiquement détruit et désalloué à la fermeture (`fclose`). `getline`/`getdelim` effectuent une lecture dynamique délimitée avec allocation automatique de tampon.
+
+---
+
+## 9. Priorité Haute : Mode VFS Hybride & Passthrough transparent vers le disque (v1.2.0) - [FAIT]
+
+Permet à un programme réel de cohabiter de manière transparente entre fichiers réels sur disque et fichiers ultra-rapides en RAM via un point de montage virtuel.
+
+Fonctions et mécanismes implémentés :
+
+- [x] **Point de montage virtuel (`rfs_mount`, `rfs_get_mount`, `rfs_unmount`)** :
+  - *Comportement :* `rfs_mount(prefix)` définit le préfixe racine virtuel (ex: `"/ramfs"`). Peut aussi être initialisé via la variable d'environnement `RAMFS_MOUNT_PREFIX`.
+  - Tout chemin débutant par ce préfixe est géré en mémoire vive par `ramfs`.
+  - Tout chemin en dehors de ce préfixe est relayé de façon transparente vers le système de fichiers réel (libc de l'OS).
+  - Si non configuré ou démonté (`rfs_unmount()`), `ramfs` conserve son mode autonome 100% en RAM.
+- [x] **Partitionnement des descripteurs sans collision (`RFS_FD_BASE = 0x40000000`)** :
+  - Les descripteurs virtuels `ramfs` sont décalés au-delà de $2^{30}$, tandis que les vrais descripteurs OS (petits entiers) passent directement à la libc (`read`, `write`, `lseek`, `close`, `fstat`, `dup`, `dup2`, `ftruncate`, `isatty`).
+- [x] **Routage transparent des flux `<stdio.h>` (`FILE*`) et répertoires (`DIR*`)** :
+  - Détection immédiate des faux flux mémoires (`0xBA5E0000 + slot`) vs vrais flux libc (`fopen`, `stdin`, `stdout`, `stderr`).
+  - Détection des pseudo-répertoires vs vrais répertoires système (`opendir`, `readdir`, `closedir`, `rewinddir`, `telldir`, `seekdir`).
+- [x] **Renommage cross-device protégé (`rename`)** :
+  - Un renommage traversant la frontière RAM $\leftrightarrow$ Disque échoue immédiatement avec le code standard POSIX `EXDEV`.
+
+---
+
+## 10. Priorité Haute : Modularisation interne & Métriques de complexité cyclomatique (v1.2.0) - [FAIT]
+
+Décomposition du monolithe initial (~3000 lignes) en unités de traduction autonomes et réduction ciblée de la complexité cyclomatique.
+
+- [x] **Décomposition modulaire & encapsulation stricte** :
+  - `src/ramfs_core.c` / `src/ramfs_core.h` : gestionnaire mémoire, catalogue, normalisation syntaxique et résolution de chemins.
+  - `src/ramfs_vfs.c` / `src/ramfs_vfs.h` : moteur VFS hybride, points de montage et partitionnement des descripteurs.
+  - `src/ramfs_posix.c` : couche descripteurs POSIX et inspection de répertoires (`<dirent.h>`).
+  - `src/ramfs_stdio.c` : couche des flux `<stdio.h>` (`FILE *`).
+  - `src/ramfs_archive.c` : moteur d'archivage `.tar.gz` et import/export récursif.
+  - Suppression intégrale de tout en-tête global fourre-tout (`ramfs_internal.h`) : seules les interfaces strictement inter-modules sont exposées.
+- [x] **Mesure et limitation de la complexité cyclomatique (`pmccabe`)** :
+  - Intégration des cibles `make complexity` et `make metrics` dans le `Makefile`.
+  - Refactorisation des fonctions volumineuses (`rfs_load`, `rfs_open`, `rfs_rename`, `rfs_opendir`, `rfs_normalize_path`, `load_dir_recursive`).
+  - Résultat : 100% des fonctions du projet respectent rigoureusement le seuil $CCN < 25$.
+

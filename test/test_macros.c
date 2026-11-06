@@ -237,6 +237,26 @@ int test_macros(void) {
    free(l_m);
    EXPECT(fclose(t_m) == 0);
 
+   /* Mode VFS Hybride via macros */
+   EXPECT(rfs_mount("/ramfs") == 0);
+   unlink("build_linux/macro_real.txt");
+   int real_m = open("build_linux/macro_real.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+   EXPECT(real_m >= 0 && (unsigned)real_m < 0x40000000);
+   EXPECT(write(real_m, "real", 4) == 4);
+   EXPECT(close(real_m) == 0);
+
+   int ram_m = open("/ramfs/macro_ram.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+   EXPECT(ram_m >= (int)0x40000000);
+   EXPECT(write(ram_m, "ram", 3) == 3);
+   EXPECT(close(ram_m) == 0);
+
+   EXPECT(disk_file_exists("build_linux/macro_real.txt"));
+   EXPECT(!disk_file_exists("/ramfs/macro_ram.txt"));
+
+   EXPECT(unlink("build_linux/macro_real.txt") == 0);
+   EXPECT(unlink("/ramfs/macro_ram.txt") == 0);
+   rfs_unmount();
+
    rfs_destroy();
    return g_fail;
 }

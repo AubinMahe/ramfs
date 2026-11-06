@@ -1195,6 +1195,129 @@ static void test_tmpfile_and_getline(void) {
    rfs_destroy();
 }
 
+static void test_hybrid_vfs(void) {
+   rfs_destroy();
+   CHECK(rfs_init(20, 20) == 0);
+
+   /* 1. Point de montage VFS Hybride */
+   CHECK(rfs_get_mount() == NULL);
+   CHECK(rfs_mount("/ramfs") == 0);
+   CHECK(rfs_get_mount() != NULL && strcmp(rfs_get_mount(), "/ramfs") == 0);
+
+   /* Nettoyage préalable si restes éventuels sur disque */
+   unlink("build_linux/real_vfs_test.txt");
+   unlink("build_linux/real_vfs_stdio.txt");
+
+   /* 2. Création et manipulation d'un fichier réel sur disque */
+   int real_fd = rfs_open("build_linux/real_vfs_test.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+   CHECK(real_fd >= 0);
+   CHECK((unsigned)real_fd < 0x40000000); /* Vrai descripteur OS */
+   CHECK(rfs_write(real_fd, "real_disk_content", 17) == 17);
+   CHECK(rfs_lseek(real_fd, 0, SEEK_SET) == 0);
+
+   char real_buf[32] = {0};
+   CHECK(rfs_read(real_fd, real_buf, 17) == 17);
+   CHECK(strcmp(real_buf, "real_disk_content") == 0);
+
+   struct stat real_st;
+   CHECK(rfs_fstat(real_fd, &real_st) == 0);
+   CHECK(real_st.st_size == 17);
+   CHECK(rfs_close(real_fd) == 0);
+
+   /* Vérification sur disque */
+   CHECK(rfs_stat("build_linux/real_vfs_test.txt", &real_st) == 0);
+   CHECK(real_st.st_size == 17);
+   CHECK(rfs_access("build_linux/real_vfs_test.txt", 0) == 0);
+
+   /* 3. Création et manipulation d'un fichier virtuel en RAM sous /ramfs */
+   int ram_fd = rfs_open("/ramfs/virtual_vfs_test.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);
+   CHECK(ram_fd >= (int)0x40000000); /* Descripteur virtuel ramfs */
+   CHECK(rfs_write(ram_fd, "in_memory_data", 14) == 14);
+   CHECK(rfs_lseek(ram_fd, 0, SEEK_SET) == 0);
+
+   char ram_buf[32] = {0};
+   CHECK(rfs_read(ram_fd, ram_buf, 14) == 14);
+   CHECK(strcmp(ram_buf, "in_memory_data") == 0);
+
+   struct stat ram_st;
+   CHECK(rfs_fstat(ram_fd, &ram_st) == 0);
+   CHECK(ram_st.st_size == 14);
+   CHECK(rfs_close(ram_fd) == 0);
+
+   CHECK(rfs_stat("/ramfs/virtual_vfs_test.txt", &ram_st) == 0);
+   CHECK(ram_st.st_size == 14);
+   CHECK(rfs_access("/ramfs/virtual_vfs_test.txt", 0) == 0);
+
+   /* 4. Statistique : seul le fichier virtuel consomme un slot RAM */
+   rfs_stats_t stats;
+   CHECK(rfs_get_stats(&stats) == 0);
+   CHECK(stats.files_used == 1);
+
+   /* 5. Rename cross-device interdit entre disque et RAM */
+   CHECK_FAIL(rfs_rename("build_linux/real_vfs_test.txt", "/ramfs/virtual_vfs_test.txt"), -1, EXDEV);
+   CHECK_FAIL(rfs_rename("/ramfs/virtual_vfs_test.txt", "build_linux/real_vfs_test.txt"), -1, EXDEV);
+
+   /* 6. Couche stdio hybride */
+   FILE *f_real = rfs_fopen("build_linux/real_vfs_stdio.txt", "w+");
+   CHECK(f_real != NULL);
+   FILE *f_ram = rfs_fopen("/ramfs/ram_vfs_stdio.txt", "w+");
+   CHECK(f_ram != NULL);
+
+   CHECK(rfs_fprintf(f_real, "HELLO DISK %d", 42) > 0);
+   CHECK(rfs_fprintf(f_ram, "HELLO RAM %d", 99) > 0);
+
+   rfs_rewind(f_real);
+   rfs_rewind(f_ram);
+
+   char l_real[32] = {0}, l_ram[32] = {0};
+   CHECK(rfs_fgets(l_real, sizeof(l_real), f_real) != NULL);
+   CHECK(rfs_fgets(l_ram, sizeof(l_ram), f_ram) != NULL);
+   CHECK(strcmp(l_real, "HELLO DISK 42") == 0);
+   CHECK(strcmp(l_ram, "HELLO RAM 99") == 0);
+
+   CHECK((unsigned)rfs_fileno(f_real) < 0x40000000);
+   CHECK(rfs_fileno(f_ram) >= (int)0x40000000);
+
+   CHECK(rfs_fclose(f_real) == 0);
+   CHECK(rfs_fclose(f_ram) == 0);
+
+   /* 7. Couche dirent hybride */
+   rfs_dir_t *d_real = rfs_opendir("build_linux");
+   CHECK(d_real != NULL);
+   struct rfs_dirent *de;
+   int found_real_file = 0;
+   while ((de = rfs_readdir(d_real)) != NULL) {
+      if (strcmp(de->d_name, "real_vfs_test.txt") == 0) {
+         found_real_file = 1;
+      }
+   }
+   CHECK(found_real_file == 1);
+   CHECK(rfs_closedir(d_real) == 0);
+
+   rfs_dir_t *d_ram = rfs_opendir("/ramfs");
+   CHECK(d_ram != NULL);
+   int found_ram_file = 0;
+   while ((de = rfs_readdir(d_ram)) != NULL) {
+      if (strcmp(de->d_name, "virtual_vfs_test.txt") == 0) {
+         found_ram_file = 1;
+      }
+   }
+   CHECK(found_ram_file == 1);
+   CHECK(rfs_closedir(d_ram) == 0);
+
+   /* 8. Nettoyage */
+   CHECK(rfs_unlink("build_linux/real_vfs_test.txt") == 0);
+   CHECK(rfs_unlink("build_linux/real_vfs_stdio.txt") == 0);
+   CHECK(rfs_unlink("/ramfs/virtual_vfs_test.txt") == 0);
+   CHECK(rfs_unlink("/ramfs/ram_vfs_stdio.txt") == 0);
+
+   /* 9. Démonter et revenir en mode autonome */
+   rfs_unmount();
+   CHECK(rfs_get_mount() == NULL);
+
+   rfs_destroy();
+}
+
 int main(void) {
    RUN(test_not_initialized);
    RUN(test_open_errors);
@@ -1217,6 +1340,7 @@ int main(void) {
    RUN(test_dup_and_truncate);
    RUN(test_dirent_and_cwd);
    RUN(test_tmpfile_and_getline);
+   RUN(test_hybrid_vfs);
    {
       int before = g_failures;
       CHECK(test_macros() == 0);

@@ -44,6 +44,28 @@ RAMFS_API int rfs_init(unsigned file_count, unsigned access_count);
 RAMFS_API void rfs_destroy(void);
 
 /**
+ * Configure un point de montage virtuel pour le mode VFS Hybride.
+ * Tout chemin débutant par ce préfixe est traité en RAM par ramfs.
+ * Tout chemin en dehors de ce préfixe est relayé de façon transparente vers le système de fichiers réel (libc).
+ *
+ * Si prefix est NULL ou "", le filtrage est désactivé et tous les chemins sont gérés en RAM.
+ *
+ * @param prefix chemin du point de montage (ex: "/ramfs", "ramfs", "./tmp/ram")
+ * @return 0 en cas de succès, -1 en cas d'erreur.
+ */
+RAMFS_API int rfs_mount(const char *prefix);
+
+/**
+ * Retourne le point de montage virtuel actuel, ou NULL si non configuré.
+ */
+RAMFS_API const char *rfs_get_mount(void);
+
+/**
+ * Démonte le point de montage virtuel (désactive le filtrage hybride).
+ */
+RAMFS_API void rfs_unmount(void);
+
+/**
  * Retourne la version de la bibliothèque fixée par le tag git le plus récent.
  *
  * @return chaîne de caractères constante contenant le numéro de version (ex: "v1.0.0").
