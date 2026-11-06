@@ -347,7 +347,6 @@ int rfs_unlink(const char *pathname) {
          return -1;
       }
    }
-   free(entry->path);
    free(file->data);
    unsigned index = (unsigned)(file - g_files);
    memset(file, 0, sizeof(ram_file_t));
@@ -467,7 +466,6 @@ static void free_overwritten_entry(ram_catalog_t *new_entry) {
    if (!new_entry || !new_entry->file) {
       return;
    }
-   free(new_entry->path);
    free(new_entry->file->data);
    unsigned index = (unsigned)(new_entry->file - g_files);
    memset(new_entry->file, 0, sizeof(ram_file_t));
@@ -489,7 +487,6 @@ static void rename_directory_children(const char *ram_old, const char *ram_new, 
             char *child_copy = strdup(child_new);
             if (child_copy) {
                ram_file_t *cf = e->file;
-               free(e->path);
                remove_from_catalog(idx);
                size_t chash = hash_path(child_new);
                size_t pos = chash & g_table_mask;
@@ -499,6 +496,7 @@ static void rename_directory_children(const char *ram_old, const char *ram_new, 
                g_table[pos].path = child_copy;
                g_table[pos].file = cf;
                g_table[pos].hash = chash;
+               catalog_depth_add(child_new);
                idx = (size_t)-1;
             }
          }
@@ -561,7 +559,6 @@ int rfs_rename(const char *oldpath, const char *newpath) {
    free_overwritten_entry(new_entry);
 
    old_entry = search_in_catalog(ram_old, hash_path(ram_old));
-   free(old_entry->path);
    remove_from_catalog((size_t)(old_entry - g_table));
 
    size_t hash = hash_path(ram_new);
@@ -572,6 +569,7 @@ int rfs_rename(const char *oldpath, const char *newpath) {
    g_table[i].path = new_path_copy;
    g_table[i].file = old_file;
    g_table[i].hash = hash;
+   catalog_depth_add(ram_new);
 
    if (old_file->is_dir) {
       rename_directory_children(ram_old, ram_new, old_file);
@@ -724,7 +722,6 @@ int rfs_rmdir(const char *pathname) {
          }
       }
    }
-   free(entry->path);
    unsigned index = (unsigned)(entry->file - g_files);
    memset(entry->file, 0, sizeof(ram_file_t));
    g_free_stack[g_free_top++] = index;

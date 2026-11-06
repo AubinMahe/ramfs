@@ -41,6 +41,41 @@ unsigned g_peak_files = 0;
 unsigned g_access_used = 0;
 unsigned g_peak_access = 0;
 
+/* Suivi de la profondeur d'arborescence (nombre maximal de '/') pour accélérer is_dir_prefix */
+static unsigned g_max_depth = 0;
+static unsigned g_depth_counts[64];
+
+static unsigned count_slashes(const char *s) {
+   unsigned n = 0;
+   while (*s) {
+      if (*s == '/') {
+         n++;
+      }
+      s++;
+   }
+   return n;
+}
+
+void catalog_depth_add(const char *path) {
+   unsigned d = count_slashes(path);
+   if (d < 64) {
+      g_depth_counts[d]++;
+   }
+   if (d > g_max_depth) {
+      g_max_depth = d;
+   }
+}
+
+static void catalog_depth_remove(const char *path) {
+   unsigned d = count_slashes(path);
+   if (d < 64 && g_depth_counts[d] > 0) {
+      g_depth_counts[d]--;
+   }
+   while (g_max_depth > 0 && g_depth_counts[g_max_depth] == 0) {
+      g_max_depth--;
+   }
+}
+
 /* =========================================================================
  * Fonctions de hachage et de gestion du catalogue
  * ========================================================================= */
@@ -109,6 +144,7 @@ ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
    g_table[i].path = path_copy;
    g_table[i].file = file;
    g_table[i].hash = hash;
+   catalog_depth_add(path);
    g_files_used++;
    if (g_files_used > g_peak_files) {
       g_peak_files = g_files_used;
@@ -139,6 +175,7 @@ ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash) {
    g_table[i].path = path_copy;
    g_table[i].file = file;
    g_table[i].hash = hash;
+   catalog_depth_add(path);
    g_files_used++;
    if (g_files_used > g_peak_files) {
       g_peak_files = g_files_used;
@@ -147,7 +184,11 @@ ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash) {
 }
 
 int is_dir_prefix(const char *clean_path) {
-   if (!g_table) {
+   if (!g_table || g_files_used == 0) {
+      return 0;
+   }
+   unsigned slashes = count_slashes(clean_path);
+   if (slashes >= g_max_depth) {
       return 0;
    }
    size_t len = strlen(clean_path);
@@ -164,6 +205,11 @@ int is_dir_prefix(const char *clean_path) {
 
 /* Retire l'entrée à l'index i en conservant la validité des chaînes de sondage. */
 void remove_from_catalog(size_t i) {
+   if (g_table[i].path != NULL) {
+      catalog_depth_remove(g_table[i].path);
+      free(g_table[i].path);
+      g_table[i].path = NULL;
+   }
    size_t j = i;
    for (;;) {
       j = (j + 1) & g_table_mask;
@@ -389,6 +435,8 @@ int rfs_init(unsigned files_count, unsigned access_count) {
    g_peak_files = 0;
    g_access_used = 0;
    g_peak_access = 0;
+   g_max_depth = 0;
+   memset(g_depth_counts, 0, sizeof(g_depth_counts));
    snprintf(g_cwd, sizeof(g_cwd), "/");
    const char *env_mount = getenv("RAMFS_MOUNT_PREFIX");
    if (env_mount && env_mount[0] != '\0') {
@@ -445,6 +493,8 @@ void rfs_destroy(void) {
    g_peak_files = 0;
    g_access_used = 0;
    g_peak_access = 0;
+   g_max_depth = 0;
+   memset(g_depth_counts, 0, sizeof(g_depth_counts));
 }
 
 int rfs_get_stats(rfs_stats_t *stats) {

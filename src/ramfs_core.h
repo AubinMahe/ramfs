@@ -71,6 +71,7 @@ ram_catalog_t *search_in_catalog(const char *path, size_t hash);
 ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash);
 ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash);
 int is_dir_prefix(const char *clean_path);
+void catalog_depth_add(const char *path);
 void remove_from_catalog(size_t i);
 ram_file_access_t *get_access(rfs_handle_t fd);
 int resolve_path(const char *src, char *dst, size_t dst_size);

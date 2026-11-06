@@ -106,6 +106,7 @@ sudo dnf install -y gcc make zlib-devel mingw64-gcc mingw64-zlib valgrind wine
 | `make test_linux` | Exécute la suite de tests unitaires Linux (17 400+ assertions) |
 | `make windows` | Compile la DLL Windows `ramfs.dll` et les exécutables via MinGW-w64 |
 | `make test_win` | Exécute la suite de tests Windows sous Wine |
+| `make bench` | Exécute le banc de mesure de performances complet (gros fichiers, IOPS, métadonnées, truncates, stdio) |
 | `make asan` | Compile et teste avec **AddressSanitizer** et **UndefinedBehaviorSanitizer** |
 | `make valgrind` | Analyse approfondie des fuites mémoire et accès invalides via Valgrind |
 | `make efence` | Traque des dépassements de tampons mémoires via Electric Fence |

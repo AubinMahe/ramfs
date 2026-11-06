@@ -17,6 +17,7 @@ HDR         := inc/ramfs.h src/ramfs_core.h src/ramfs_vfs.h
 TESTS       := test/main.c test/test_macros.c
 BENCH       := test/benchmark.c
 BENCH_RAM   := test/benchmark-ramfs-only.c
+PERF_SUITE  := test/perf_benchmark.c
 EXTRA       ?=
 MEASURES    ?=
 GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "v1.0.0")
@@ -33,8 +34,10 @@ B_COV       := build_coverage
 ALL_DIRS    := build_linux build_linux_debug build_win build_win_debug $(B_ASAN) $(B_DBG) $(B_PERF) $(B_COV)
 BENCH_LINUX := $(BUILD_LINUX)/benchmark
 BENCH_WIN   := $(BUILD_WIN)/benchmark.exe
+PERF_BIN    := $(BUILD_LINUX)/perf_benchmark
+PERF_WIN    := $(BUILD_WIN)/perf_benchmark.exe
 
-.PHONY: all linux windows win clean help test test_linux test_win bench_linux bench_win check asan valgrind efence perf callgrind format-sources complexity metrics coverage lcov gcov
+.PHONY: all linux windows win clean help test test_linux test_win bench bench_linux bench_win check asan valgrind efence perf callgrind format-sources complexity metrics coverage lcov gcov
 
 all: linux windows
 
@@ -56,13 +59,19 @@ $(BUILD_LINUX)/test_ramfs: $(TESTS) $(HDR) $(BUILD_LINUX)/libramfs.so
 $(BENCH_LINUX): $(BENCH) $(HDR) $(BUILD_LINUX)/libramfs.so
 	$(CC_LINUX) $(CFLAGS) -MMD -MT $@ -MF $@.d -o $@ $(BENCH) -L$(BUILD_LINUX) -lramfs -Wl,-rpath,'$$ORIGIN'
 
+$(PERF_BIN): $(PERF_SUITE) $(HDR) $(BUILD_LINUX)/libramfs.so
+	$(CC_LINUX) $(CFLAGS) -MMD -MT $@ -MF $@.d -o $@ $(PERF_SUITE) -L$(BUILD_LINUX) -lramfs -Wl,-rpath,'$$ORIGIN'
+
 test_linux: $(BUILD_LINUX)/test_ramfs
+	./$<
+
+bench: $(PERF_BIN)
 	./$<
 
 bench_linux: $(BENCH_LINUX)
 	./$<
 
-windows: $(BUILD_WIN)/ramfs.dll $(BUILD_WIN)/test_ramfs.exe $(BENCH_WIN)
+windows: $(BUILD_WIN)/ramfs.dll $(BUILD_WIN)/test_ramfs.exe $(BENCH_WIN) $(PERF_WIN)
 
 $(BUILD_WIN)/ramfs.dll: $(SRC_LIB) $(HDR)
 	@mkdir -p $(@D)
@@ -75,6 +84,10 @@ $(BUILD_WIN)/test_ramfs.exe: $(TESTS) $(BUILD_WIN)/ramfs.dll
 $(BENCH_WIN): $(BENCH) $(BUILD_WIN)/ramfs.dll
 	$(call say,WIN-CC,$@)
 	$(CC_WIN) $(CFLAGS) -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(BENCH) -L$(BUILD_WIN) -lramfs
+
+$(PERF_WIN): $(PERF_SUITE) $(BUILD_WIN)/ramfs.dll
+	$(call say,WIN-CC,$@)
+	$(CC_WIN) $(CFLAGS) -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(PERF_SUITE) -L$(BUILD_WIN) -lramfs
 
 test_win: $(BUILD_WIN)/test_ramfs.exe
 	cd $(BUILD_WIN) && $(WINE) test_ramfs.exe
