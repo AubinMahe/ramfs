@@ -1,6 +1,7 @@
 #pragma once
 
 #include "ramfs.h"
+#include "ramfs_sync.h"
 #include <fcntl.h>
 #include <limits.h>
 #include <stddef.h>
@@ -27,6 +28,7 @@ typedef struct {
    size_t size;                                      /* Taille logique du fichier en octets */
    int is_dir;                                       /* 1 si répertoire, 0 si fichier régulier */
    int is_inlined;                                   /* 1 si contenu dans inline_data, 0 si paginé */
+   rfs_rwlock_t *rwlock;                             /* Verrou lecteur/rédacteur par fichier */
 } ram_file_t;
 
 /* Entrée de la table de hachage. path == NULL indique une case libre. */
@@ -39,6 +41,7 @@ typedef struct {
 typedef struct {
    off_t offset;
    unsigned ref_count;
+   rfs_mutex_t lock;
 } ram_shared_offset_t;
 
 typedef struct {
@@ -94,3 +97,17 @@ int rfs_file_truncate(ram_file_t *file, size_t new_len);
 void rfs_file_free_storage(ram_file_t *file);
 int rfs_file_get_byte(const ram_file_t *file, size_t offset);
 int rfs_file_put_byte(ram_file_t *file, size_t offset, unsigned char c);
+
+/* Synchronisation et verrous (Thread-Safety) */
+void rfs_file_lock_init(ram_file_t *file);
+void rfs_file_lock_destroy(ram_file_t *file);
+void rfs_file_rdlock(ram_file_t *file);
+void rfs_file_wrlock(ram_file_t *file);
+void rfs_file_unlock(ram_file_t *file);
+
+void rfs_catalog_rdlock(void);
+void rfs_catalog_wrlock(void);
+void rfs_catalog_unlock(void);
+
+void rfs_access_lock(void);
+void rfs_access_unlock(void);
