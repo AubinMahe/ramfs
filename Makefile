@@ -13,8 +13,9 @@ else
   $(error MODE doit valoir RELEASE ou DEBUG)
 endif
 SRC_LIB     := src/ramfs_core.c src/ramfs_vfs.c src/ramfs_posix.c src/ramfs_stdio.c src/ramfs_archive.c
-HDR         := inc/ramfs.h src/ramfs_core.h src/ramfs_vfs.h
+HDR         := inc/ramfs.h src/ramfs_core.h src/ramfs_vfs.h src/ramfs_sync.h
 TESTS       := test/main.c test/test_macros.c
+MT_TESTS    := test/test_mt.c
 PERF_SUITE  := test/perf_benchmark.c
 EXTRA       ?=
 MEASURES    ?=
@@ -26,14 +27,15 @@ CPPFLAGS    := -DBUILDING_RAMFS_DLL
 BUILD_LINUX := build_linux$(SUFFIX)
 BUILD_WIN   := build_win$(SUFFIX)
 B_ASAN      := build_asan
+B_TSAN      := build_tsan
 B_DBG       := build_valgrind
 B_PERF      := build_perf
 B_COV       := build_coverage
-ALL_DIRS    := build_linux build_linux_debug build_win build_win_debug $(B_ASAN) $(B_DBG) $(B_PERF) $(B_COV)
+ALL_DIRS    := build_linux build_linux_debug build_win build_win_debug $(B_ASAN) $(B_TSAN) $(B_DBG) $(B_PERF) $(B_COV)
 PERF_BIN    := $(BUILD_LINUX)/perf_benchmark
 PERF_WIN    := $(BUILD_WIN)/perf_benchmark.exe
 
-.PHONY: all linux windows win clean help test test_linux test_win bench check asan valgrind efence perf callgrind format-sources complexity metrics coverage lcov gcov
+.PHONY: all linux windows win clean help test test_linux test_mt test_win bench check asan tsan valgrind efence perf callgrind format-sources complexity metrics coverage lcov gcov
 
 all: linux windows
 
@@ -43,14 +45,21 @@ clean:
 format-sources:
 	clang-format -i --verbose inc/*.h src/*.c src/*.h test/*.c
 
-linux: $(BUILD_LINUX)/libramfs.so $(BUILD_LINUX)/test_ramfs $(BENCH_LINUX)
+linux: $(BUILD_LINUX)/libramfs.so $(BUILD_LINUX)/libramfs_mt.so $(BUILD_LINUX)/test_ramfs $(BUILD_LINUX)/test_ramfs_mt $(PERF_BIN)
 
 $(BUILD_LINUX)/libramfs.so: $(SRC_LIB) $(HDR)
 	@mkdir -p $(@D)
 	$(CC_LINUX) $(CFLAGS) $(CPPFLAGS) -fPIC -fvisibility=hidden -shared -MMD -MT $@ -MF $@.d -o $@ $(SRC_LIB) -lz
 
+$(BUILD_LINUX)/libramfs_mt.so: $(SRC_LIB) $(HDR)
+	@mkdir -p $(@D)
+	$(CC_LINUX) $(CFLAGS) $(CPPFLAGS) -DRAMFS_THREAD_SAFE -pthread -fPIC -fvisibility=hidden -shared -MMD -MT $@ -MF $@.d -o $@ $(SRC_LIB) -lz
+
 $(BUILD_LINUX)/test_ramfs: $(TESTS) $(HDR) $(BUILD_LINUX)/libramfs.so
 	$(CC_LINUX) $(CFLAGS) -MMD -MT $@ -MF $@.d -o $@ $(TESTS) -L$(BUILD_LINUX) -lramfs -Wl,-rpath,'$$ORIGIN'
+
+$(BUILD_LINUX)/test_ramfs_mt: $(MT_TESTS) $(HDR) $(BUILD_LINUX)/libramfs_mt.so
+	$(CC_LINUX) $(CFLAGS) -pthread -MMD -MT $@ -MF $@.d -o $@ $(MT_TESTS) -L$(BUILD_LINUX) -lramfs_mt -Wl,-rpath,'$$ORIGIN'
 
 $(PERF_BIN): $(PERF_SUITE) $(HDR) $(BUILD_LINUX)/libramfs.so
 	$(CC_LINUX) $(CFLAGS) -MMD -MT $@ -MF $@.d -o $@ $(PERF_SUITE) -L$(BUILD_LINUX) -lramfs -Wl,-rpath,'$$ORIGIN'
@@ -58,27 +67,36 @@ $(PERF_BIN): $(PERF_SUITE) $(HDR) $(BUILD_LINUX)/libramfs.so
 test_linux: $(BUILD_LINUX)/test_ramfs
 	./$<
 
+test_mt: $(BUILD_LINUX)/test_ramfs_mt
+	./$<
+
 bench: $(PERF_BIN)
 	./$<
 
-windows: $(BUILD_WIN)/ramfs.dll $(BUILD_WIN)/test_ramfs.exe $(PERF_WIN)
+windows: $(BUILD_WIN)/ramfs.dll $(BUILD_WIN)/ramfs_mt.dll $(BUILD_WIN)/test_ramfs.exe $(BUILD_WIN)/test_ramfs_mt.exe $(PERF_WIN)
 
 $(BUILD_WIN)/ramfs.dll: $(SRC_LIB) $(HDR)
 	@mkdir -p $(@D)
 	$(CC_WIN) $(CFLAGS) $(CPPFLAGS) -shared -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(SRC_LIB) -lz -Wl,--out-implib,$(BUILD_WIN)/libramfs.a
 
+$(BUILD_WIN)/ramfs_mt.dll: $(SRC_LIB) $(HDR)
+	@mkdir -p $(@D)
+	$(CC_WIN) $(CFLAGS) $(CPPFLAGS) -DRAMFS_THREAD_SAFE -shared -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(SRC_LIB) -lz -Wl,-Bstatic -lpthread -Wl,-Bdynamic -Wl,--out-implib,$(BUILD_WIN)/libramfs_mt.a
+
 $(BUILD_WIN)/test_ramfs.exe: $(TESTS) $(BUILD_WIN)/ramfs.dll
-	$(call say,WIN-CC,$@)
 	$(CC_WIN) $(CFLAGS) -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(TESTS) -L$(BUILD_WIN) -lramfs
 
+$(BUILD_WIN)/test_ramfs_mt.exe: $(MT_TESTS) $(BUILD_WIN)/ramfs_mt.dll
+	$(CC_WIN) $(CFLAGS) -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(MT_TESTS) -L$(BUILD_WIN) -lramfs_mt -Wl,-Bstatic -lpthread -Wl,-Bdynamic
+
 $(PERF_WIN): $(PERF_SUITE) $(BUILD_WIN)/ramfs.dll
-	$(call say,WIN-CC,$@)
 	$(CC_WIN) $(CFLAGS) -static-libgcc -MMD -MT $@ -MF $@.d -o $@ $(PERF_SUITE) -L$(BUILD_WIN) -lramfs
 
-test_win: $(BUILD_WIN)/test_ramfs.exe
-	cd $(BUILD_WIN) && $(WINE) test_ramfs.exe
+test_win: $(BUILD_WIN)/test_ramfs.exe $(BUILD_WIN)/test_ramfs_mt.exe
+	WINEPATH=$$(pwd)/$(BUILD_WIN) $(WINE) $(BUILD_WIN)/test_ramfs.exe
+	WINEPATH=$$(pwd)/$(BUILD_WIN) $(WINE) $(BUILD_WIN)/test_ramfs_mt.exe
 
-test: test_linux test_win
+test: test_linux test_mt test_win
 
 QA_CFLAGS := $(WARN) -I inc $(POSIX_FLAGS) -DRAMFS_VERSION=\"$(GIT_VERSION)\"
 QA_LDLIBS := -lz
@@ -89,6 +107,13 @@ $(B_ASAN)/test_ramfs: $(SRC_LIB) $(TESTS) $(HDR)
 
 asan: $(B_ASAN)/test_ramfs
 	./$<
+
+$(B_TSAN)/test_ramfs_mt: $(SRC_LIB) $(MT_TESTS) $(HDR)
+	@mkdir -p $(@D)
+	$(CC_LINUX) $(QA_CFLAGS) -DRAMFS_THREAD_SAFE -pthread -g -O1 -fno-omit-frame-pointer -fsanitize=thread -o $@ $(SRC_LIB) $(MT_TESTS) $(QA_LDLIBS)
+
+tsan: $(B_TSAN)/test_ramfs_mt
+	setarch $$(uname -m) -R ./$<
 
 $(B_DBG)/test_ramfs: $(SRC_LIB) $(TESTS) $(HDR)
 	@mkdir -p $(@D)
@@ -105,7 +130,7 @@ efence: $(B_DBG)/test_ramfs_ef
 	EF_PROTECT_BELOW=0 ./$<
 	EF_PROTECT_BELOW=1 ./$<
 
-check: test_linux asan valgrind efence
+check: test_linux test_mt asan tsan valgrind efence
 
 $(B_PERF)/perf_benchmark: $(SRC_LIB) $(PERF_SUITE) $(HDR)
 	@mkdir -p $(@D)

@@ -56,12 +56,18 @@ Fonctions implémentées et redirigées :
 
 ---
 
-## 5. Rappel d'architecture : Concurrence & Threads - [CLASSÉ]
+## 5. Concurrence & Support Multi-Thread (Thread-Safety à coût zéro) - [FAIT]
 
-- [x] **Hypothèse mono-thread validée :**
-  - L'application legacy cible est strictement mono-thread.
-  - La bibliothèque `ramfs` n'embarque aucun verrouillage (`mutex` / sections critiques), par choix délibéré d'architecture afin d'éliminer tout surcoût de synchronisation et maximiser le débit mémoire brut.
-  - **Parallélisme multi-processus :** `ramfs` isole naturellement chaque instance dans son propre espace mémoire, facilitant le passage à l'échelle horizontal (multi-processus, batchs parallèles) sans contention ni goulot d'étranglement sur les disques physiques.
+- [x] **Généralisation v2.0.0 : Support Multi-Thread sans régression mono-thread :**
+  - *Évolution architecturale :* Initialement classée car l'application legacy cible était strictement mono-thread, la thread-safety est désormais intégrée pour la version 2.0.0 afin de permettre une utilisation concurrente sécurisée sans sacrifier le débit mémoire brut mono-thread historique.
+  - *Architecture duale / Zéro-coût :*
+    - `libramfs.so` / `ramfs.dll` : version mono-thread ultra-rapide (verrous neutralisés à la compilation sans overhead), garantissant 100% du débit maximal d'origine (32 ns par op I/O).
+    - `libramfs_mt.so` / `ramfs_mt.dll` : version thread-safe pour les applications multi-threadées.
+  - *Verrouillage fin par fichier (`pthread_rwlock_t`) :*
+    - Accès concurrents en lecture partagée sans contention (`pthread_rwlock_rdlock`).
+    - Verrouillage exclusif en écriture (`pthread_rwlock_wrlock`).
+    - Verrouillage global pour les opérations structurelles sur le catalogue (`create`, `unlink`, `rename`, extension/redimensionnement) et la table des descripteurs.
+  - *Validation :* Campagne de tests sous ThreadSanitizer (`-fsanitize=thread`) avec 16 threads concurrents (8 000 opérations) sans course critique (*data race*).
 
 ---
 

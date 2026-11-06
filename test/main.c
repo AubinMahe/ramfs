@@ -1516,6 +1516,7 @@ static void test_coverage_boost(void) {
       CHECK(rfs_feof(real_f) == 0);
       CHECK(rfs_ferror(real_f) == 0);
       rfs_clearerr(real_f);
+      CHECK(rfs_fseek(real_f, 0, SEEK_CUR) == 0);
       CHECK(rfs_fputc('!', real_f) == '!');
       CHECK(rfs_fclose(real_f) == 0);
       unlink("test_coverage_host.txt");

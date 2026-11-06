@@ -54,20 +54,68 @@ static unsigned char **g_slab_list = NULL;
 static size_t g_slab_count = 0;
 static size_t g_slab_capacity = 0;
 
+static rfs_rwlock_t g_catalog_rwlock;
+static rfs_mutex_t g_access_mutex;
+static rfs_mutex_t g_slab_mutex;
+
+void rfs_file_lock_init(ram_file_t *file) {
+   if (file) {
+      file->rwlock = rfs_rwlock_create();
+   }
+}
+
+void rfs_file_lock_destroy(ram_file_t *file) {
+   if (file) {
+      rfs_rwlock_free(file->rwlock);
+      file->rwlock = NULL;
+   }
+}
+
+void rfs_file_rdlock(ram_file_t *file) {
+   if (file && file->rwlock) {
+      RFS_RWLOCK_RDLOCK(file->rwlock);
+   }
+}
+
+void rfs_file_wrlock(ram_file_t *file) {
+   if (file && file->rwlock) {
+      RFS_RWLOCK_WRLOCK(file->rwlock);
+   }
+}
+
+void rfs_file_unlock(ram_file_t *file) {
+   if (file && file->rwlock) {
+      RFS_RWLOCK_UNLOCK(file->rwlock);
+   }
+}
+
+void rfs_catalog_rdlock(void) { RFS_RWLOCK_RDLOCK(&g_catalog_rwlock); }
+
+void rfs_catalog_wrlock(void) { RFS_RWLOCK_WRLOCK(&g_catalog_rwlock); }
+
+void rfs_catalog_unlock(void) { RFS_RWLOCK_UNLOCK(&g_catalog_rwlock); }
+
+void rfs_access_lock(void) { RFS_MUTEX_LOCK(&g_access_mutex); }
+
+void rfs_access_unlock(void) { RFS_MUTEX_UNLOCK(&g_access_mutex); }
+
 static void release_chunk(unsigned char *chunk) {
    if (!chunk) {
       return;
    }
+   RFS_MUTEX_LOCK(&g_slab_mutex);
    if (g_chunk_pool_top >= g_chunk_pool_capacity) {
       size_t new_cap = g_chunk_pool_capacity ? g_chunk_pool_capacity * 2 : 64;
       unsigned char **new_pool = realloc(g_chunk_pool, new_cap * sizeof(unsigned char *));
       if (!new_pool) {
+         RFS_MUTEX_UNLOCK(&g_slab_mutex);
          return;
       }
       g_chunk_pool = new_pool;
       g_chunk_pool_capacity = new_cap;
    }
    g_chunk_pool[g_chunk_pool_top++] = chunk;
+   RFS_MUTEX_UNLOCK(&g_slab_mutex);
 }
 
 static int allocate_slab(void) {
@@ -92,12 +140,16 @@ static int allocate_slab(void) {
 }
 
 static unsigned char *allocate_chunk(void) {
+   RFS_MUTEX_LOCK(&g_slab_mutex);
    if (g_chunk_pool_top == 0) {
       if (allocate_slab() != 0) {
+         RFS_MUTEX_UNLOCK(&g_slab_mutex);
          return malloc(RAMFS_CHUNK_SIZE);
       }
    }
-   return g_chunk_pool[--g_chunk_pool_top];
+   unsigned char *chunk = g_chunk_pool[--g_chunk_pool_top];
+   RFS_MUTEX_UNLOCK(&g_slab_mutex);
+   return chunk;
 }
 
 static unsigned count_slashes(const char *s) {
@@ -210,6 +262,9 @@ static int expand_files_capacity(void) {
    rebase_files_pointers(diff);
    g_files = new_files;
    g_free_stack = new_stack;
+   for (unsigned i = old_cap; i < new_cap; i++) {
+      rfs_file_lock_init(&g_files[i]);
+   }
    for (unsigned i = new_cap; i > old_cap; i--) {
       g_free_stack[g_free_top++] = i - 1;
    }
@@ -842,8 +897,12 @@ int rfs_init(unsigned files_count, unsigned access_count) {
    /* indices poussés en ordre décroissant : le 0 sort en premier */
    for (unsigned i = 0; i < files_count; i++) {
       g_free_stack[i] = files_count - 1 - i;
+      rfs_file_lock_init(&g_files[i]);
    }
    g_free_top = files_count;
+   RFS_RWLOCK_INIT(&g_catalog_rwlock);
+   RFS_MUTEX_INIT(&g_access_mutex);
+   RFS_MUTEX_INIT(&g_slab_mutex);
    /* Préchauffage du pool (Axe 4) : 1 slab de 16 blocs de 64 Ko (1 Mo) */
    allocate_slab();
    return 0;
@@ -859,6 +918,7 @@ void rfs_destroy(void) {
    if (g_files) {
       for (unsigned i = 0; i < g_files_capacity; i++) {
          rfs_file_free_storage(g_files + i);
+         rfs_file_lock_destroy(g_files + i);
       }
       free(g_files);
    }
@@ -891,6 +951,9 @@ void rfs_destroy(void) {
       g_chunk_pool_top = 0;
       g_chunk_pool_capacity = 0;
    }
+   RFS_RWLOCK_DESTROY(&g_catalog_rwlock);
+   RFS_MUTEX_DESTROY(&g_access_mutex);
+   RFS_MUTEX_DESTROY(&g_slab_mutex);
    snprintf(g_cwd, sizeof(g_cwd), "/");
    rfs_unmount();
    g_table = NULL;
@@ -918,12 +981,16 @@ int rfs_get_stats(rfs_stats_t *stats) {
       errno = ENODEV;
       return -1;
    }
+   rfs_catalog_rdlock();
+   rfs_access_lock();
    stats->files_used = g_files_used;
    stats->peak_files = g_peak_files;
    stats->files_capacity = g_files_capacity;
    stats->access_used = g_access_used;
    stats->peak_access = g_peak_access;
    stats->access_capacity = g_access_capacity;
+   rfs_access_unlock();
+   rfs_catalog_unlock();
    return 0;
 }
 
