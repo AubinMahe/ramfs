@@ -84,6 +84,7 @@ void remove_from_catalog(size_t i);
 ram_file_access_t *get_access(rfs_handle_t fd);
 int resolve_path(const char *src, char *dst, size_t dst_size);
 void fill_stat_buf(const ram_file_t *file, struct stat *buf);
+int expand_access_table(void);
 
 /* Opérations de stockage paginé (Chunked Storage) */
 unsigned char *rfs_file_get_chunk(const ram_file_t *file, size_t idx);

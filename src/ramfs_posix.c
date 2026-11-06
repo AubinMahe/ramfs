@@ -48,9 +48,13 @@ static rfs_handle_t allocate_access_slot(const ram_file_t *file, int access_mode
       }
    }
    if (free_slot == RFS_INVALID_HANDLE) {
-      fprintf(stderr, "Capacité d'accès atteinte !\n");
-      errno = ENOMEM;
-      return RFS_INVALID_HANDLE;
+      unsigned old_cap = g_access_capacity;
+      if (expand_access_table() != 0) {
+         fprintf(stderr, "Capacité d'accès atteinte !\n");
+         errno = ENOMEM;
+         return RFS_INVALID_HANDLE;
+      }
+      free_slot = (rfs_handle_t)old_cap;
    }
    return free_slot;
 }
@@ -754,10 +758,10 @@ int rfs_dup(rfs_handle_t oldfd) {
       errno = EBADF;
       return -1;
    }
-   ram_file_access_t *old_acc = get_access(oldfd);
-   if (!old_acc) {
+   if (!get_access(oldfd)) {
       return -1;
    }
+   unsigned old_slot = fd_to_slot(oldfd);
    rfs_handle_t free_slot = RFS_INVALID_HANDLE;
    for (unsigned i = 0; i < g_access_capacity; i++) {
       if (g_access_table[i].file == NULL) {
@@ -766,9 +770,14 @@ int rfs_dup(rfs_handle_t oldfd) {
       }
    }
    if (free_slot == RFS_INVALID_HANDLE) {
-      errno = EMFILE;
-      return -1;
+      unsigned old_cap = g_access_capacity;
+      if (expand_access_table() != 0) {
+         errno = EMFILE;
+         return -1;
+      }
+      free_slot = (rfs_handle_t)old_cap;
    }
+   ram_file_access_t *old_acc = g_access_table + old_slot;
    ram_file_access_t *new_acc = g_access_table + free_slot;
    new_acc->file = old_acc->file;
    new_acc->shared_offset = old_acc->shared_offset;

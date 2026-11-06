@@ -113,15 +113,21 @@ static void test_open_errors(void) {
    rfs_handle_t r2 = rfs_open("a", O_RDONLY);
    CHECK(r1 >= 0 && r2 >= 0 && r1 != r2); /* lecteurs multiples autorisés */
    CHECK_FAIL(rfs_open("a", O_WRONLY), RFS_INVALID_HANDLE, EBUSY);
-   CHECK_FAIL(rfs_open("a", O_RDONLY), RFS_INVALID_HANDLE, ENOMEM); /* table d'accès pleine */
+   /* Auto-extension de la table d'accès : le 3e lecteur est alloué dynamiquement */
+   rfs_handle_t r3 = rfs_open("a", O_RDONLY);
+   CHECK(r3 >= 0 && r3 != r1 && r3 != r2);
    CHECK(rfs_close(r1) == 0);
    CHECK(rfs_close(r2) == 0);
+   CHECK(rfs_close(r3) == 0);
 
    rfs_handle_t b = rfs_open("b", O_CREAT | O_WRONLY, 0644);
    CHECK(b >= 0);
    CHECK(rfs_close(b) == 0);
-   CHECK_FAIL(rfs_open("c", O_CREAT | O_WRONLY, 0644), RFS_INVALID_HANDLE, ENOMEM); /* catalogue plein */
-   CHECK_FAIL(rfs_open("c", O_RDONLY), RFS_INVALID_HANDLE, ENOENT);                 /* rien n'a été créé */
+   /* Auto-extension du catalogue : création au-delà de la capacité initiale */
+   rfs_handle_t c = rfs_open("c", O_CREAT | O_WRONLY, 0644);
+   CHECK(c >= 0);
+   CHECK(rfs_close(c) == 0);
+   CHECK(has_content("c", ""));
    rfs_destroy();
 }
 
@@ -229,7 +235,10 @@ static void test_unlink_and_slots(void) {
       snprintf(name, sizeof(name), "f%d", i);
       CHECK(put(name, name));
    }
-   CHECK_FAIL(rfs_open("f8", O_CREAT | O_WRONLY, 0644), RFS_INVALID_HANDLE, ENOMEM);
+   /* Auto-extension au-delà de la capacité initiale de 8 fichiers */
+   CHECK(put("f8", "f8"));
+   CHECK(has_content("f8", "f8"));
+   CHECK(rfs_unlink("f8") == 0);
 
    CHECK_FAIL(rfs_unlink(NULL), -1, EINVAL);
    CHECK(rfs_unlink("f3") == 0);
@@ -269,7 +278,10 @@ static void test_hash_integrity(void) {
       make_name(name, sizeof(name), i);
       CHECK(put(name, name));
    }
-   CHECK_FAIL(rfs_open("debordement", O_CREAT | O_WRONLY, 0644), RFS_INVALID_HANDLE, ENOMEM);
+   /* Auto-extension au-delà de NB_FILES (2000) */
+   CHECK(put("debordement", "valeur_debordement"));
+   CHECK(has_content("debordement", "valeur_debordement"));
+   CHECK(rfs_unlink("debordement") == 0);
 
    for (int i = 0; i < NB_FILES; i += 2) {
       make_name(name, sizeof(name), i);
@@ -1716,6 +1728,74 @@ static void test_chunked_storage(void) {
    rfs_destroy();
 }
 
+static void test_dynamic_catalog(void) {
+   /* 1. Initialisation par défaut avec zéros */
+   CHECK(rfs_init(0, 0) == 0);
+   rfs_stats_t st;
+   CHECK(rfs_get_stats(&st) == 0);
+   CHECK(st.files_capacity == 32);
+   CHECK(st.access_capacity == 16);
+   CHECK(st.files_used == 0);
+   rfs_destroy();
+
+   /* 2. Démarrage avec de très petites capacités (2 fichiers, 2 descripteurs) */
+   CHECK(rfs_init(2, 2) == 0);
+
+   /* Création de 150 fichiers pour forcer de multiples extensions de catalogue */
+   char path[64];
+   char content[64];
+   for (int i = 0; i < 150; i++) {
+      snprintf(path, sizeof(path), "dyn_dir/sub_%03d.txt", i);
+      snprintf(content, sizeof(content), "CONTENT_OF_FILE_%03d", i);
+      CHECK(put(path, content));
+   }
+
+   /* Vérification des statistiques de croissance */
+   CHECK(rfs_get_stats(&st) == 0);
+   CHECK(st.files_used == 150);
+   CHECK(st.files_capacity >= 150);
+
+   /* Vérification de l'intégrité de tous les fichiers créés */
+   for (int i = 0; i < 150; i++) {
+      snprintf(path, sizeof(path), "dyn_dir/sub_%03d.txt", i);
+      snprintf(content, sizeof(content), "CONTENT_OF_FILE_%03d", i);
+      CHECK(has_content(path, content));
+   }
+
+   /* 3. Ouverture simultanée de 30 descripteurs pour tester l'extension de la table d'accès */
+   int fds[30];
+   for (int i = 0; i < 30; i++) {
+      snprintf(path, sizeof(path), "dyn_dir/sub_%03d.txt", i);
+      fds[i] = rfs_open(path, O_RDONLY);
+      CHECK(fds[i] >= 0);
+   }
+
+   CHECK(rfs_get_stats(&st) == 0);
+   CHECK(st.access_used == 30);
+   CHECK(st.access_capacity >= 30);
+
+   for (int i = 0; i < 30; i++) {
+      CHECK(rfs_close(fds[i]) == 0);
+   }
+   CHECK(rfs_get_stats(&st) == 0);
+   CHECK(st.access_used == 0);
+
+   /* 4. Duplication au-delà de la capacité */
+   int fd_base = rfs_open("dyn_dir/sub_000.txt", O_RDONLY);
+   CHECK(fd_base >= 0);
+   int dup_fds[35];
+   for (int i = 0; i < 35; i++) {
+      dup_fds[i] = rfs_dup(fd_base);
+      CHECK(dup_fds[i] >= 0);
+   }
+   for (int i = 0; i < 35; i++) {
+      CHECK(rfs_close(dup_fds[i]) == 0);
+   }
+   CHECK(rfs_close(fd_base) == 0);
+
+   rfs_destroy();
+}
+
 int main(void) {
    RUN(test_not_initialized);
    RUN(test_open_errors);
@@ -1741,6 +1821,7 @@ int main(void) {
    RUN(test_hybrid_vfs);
    RUN(test_coverage_boost);
    RUN(test_chunked_storage);
+   RUN(test_dynamic_catalog);
    {
       int before = g_failures;
       CHECK(test_macros() == 0);

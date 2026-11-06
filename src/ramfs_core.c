@@ -173,11 +173,98 @@ ram_catalog_t *search_in_catalog(const char *path, size_t hash) {
    return NULL;
 }
 
-ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
-   if (g_free_top == 0) {
-      fprintf(stderr, "Capacité du catalogue atteinte !\n");
+static void rebase_files_pointers(ptrdiff_t diff) {
+   if (diff == 0) {
+      return;
+   }
+   for (size_t i = 0; i <= g_table_mask; i++) {
+      if (g_table[i].path != NULL && g_table[i].file != NULL) {
+         g_table[i].file = (ram_file_t *)((char *)g_table[i].file + diff);
+      }
+   }
+   for (unsigned i = 0; i < g_access_capacity; i++) {
+      if (g_access_table[i].file != NULL) {
+         g_access_table[i].file = (ram_file_t *)((char *)g_access_table[i].file + diff);
+      }
+   }
+}
+
+static int expand_files_capacity(void) {
+   unsigned old_cap = g_files_capacity;
+   unsigned new_cap = old_cap ? old_cap * 2 : 32;
+   uintptr_t old_addr = (uintptr_t)g_files;
+   ram_file_t *new_files = realloc(g_files, new_cap * sizeof(ram_file_t));
+   if (!new_files) {
       errno = ENOMEM;
-      return NULL;
+      return -1;
+   }
+   ptrdiff_t diff = (ptrdiff_t)((uintptr_t)new_files - old_addr);
+   unsigned *new_stack = realloc(g_free_stack, new_cap * sizeof(unsigned));
+   if (!new_stack) {
+      g_files = new_files;
+      rebase_files_pointers(diff);
+      errno = ENOMEM;
+      return -1;
+   }
+   memset(new_files + old_cap, 0, (new_cap - old_cap) * sizeof(ram_file_t));
+   rebase_files_pointers(diff);
+   g_files = new_files;
+   g_free_stack = new_stack;
+   for (unsigned i = new_cap; i > old_cap; i--) {
+      g_free_stack[g_free_top++] = i - 1;
+   }
+   g_files_capacity = new_cap;
+   return 0;
+}
+
+static int resize_catalog_table(void) {
+   size_t old_table_size = g_table_mask + 1;
+   size_t new_table_size = old_table_size * 2;
+   ram_catalog_t *new_table = calloc(new_table_size, sizeof(ram_catalog_t));
+   if (!new_table) {
+      errno = ENOMEM;
+      return -1;
+   }
+   size_t new_mask = new_table_size - 1;
+   for (size_t i = 0; i < old_table_size; i++) {
+      if (g_table[i].path != NULL) {
+         size_t j = g_table[i].hash & new_mask;
+         while (new_table[j].path != NULL) {
+            j = (j + 1) & new_mask;
+         }
+         new_table[j] = g_table[i];
+      }
+   }
+   free(g_table);
+   g_table = new_table;
+   g_table_mask = new_mask;
+   return 0;
+}
+
+int expand_access_table(void) {
+   unsigned old_cap = g_access_capacity;
+   unsigned new_cap = old_cap ? old_cap * 2 : 16;
+   ram_file_access_t *new_table = realloc(g_access_table, new_cap * sizeof(ram_file_access_t));
+   if (!new_table) {
+      errno = ENOMEM;
+      return -1;
+   }
+   memset(new_table + old_cap, 0, (new_cap - old_cap) * sizeof(ram_file_access_t));
+   g_access_table = new_table;
+   g_access_capacity = new_cap;
+   return 0;
+}
+
+static ram_catalog_t *create_catalog_entry_generic(const char *path, size_t hash, int is_dir) {
+   if (g_free_top == 0) {
+      if (expand_files_capacity() != 0) {
+         return NULL;
+      }
+   }
+   if ((g_files_used + 1) * 2 > (g_table_mask + 1)) {
+      if (resize_catalog_table() != 0) {
+         return NULL;
+      }
    }
    char *path_copy = strdup(path);
    if (!path_copy) {
@@ -190,8 +277,8 @@ ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
    file->chunks_count = 0;
    file->chunks_capacity = 0;
    file->size = 0;
-   file->is_dir = 0;
-   file->is_inlined = 1;
+   file->is_dir = is_dir;
+   file->is_inlined = is_dir ? 0 : 1;
    size_t i = hash & g_table_mask;
    while (g_table[i].path != NULL) {
       i = (i + 1) & g_table_mask;
@@ -207,39 +294,9 @@ ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
    return g_table + i;
 }
 
-ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash) {
-   if (g_free_top == 0) {
-      fprintf(stderr, "Capacité du catalogue atteinte !\n");
-      errno = ENOMEM;
-      return NULL;
-   }
-   char *path_copy = strdup(path);
-   if (!path_copy) {
-      errno = ENOMEM;
-      return NULL;
-   }
-   ram_file_t *file = g_files + g_free_stack[--g_free_top];
-   file->first_chunk = NULL;
-   file->chunks = NULL;
-   file->chunks_count = 0;
-   file->chunks_capacity = 0;
-   file->size = 0;
-   file->is_dir = 1;
-   file->is_inlined = 0;
-   size_t i = hash & g_table_mask;
-   while (g_table[i].path != NULL) {
-      i = (i + 1) & g_table_mask;
-   }
-   g_table[i].path = path_copy;
-   g_table[i].file = file;
-   g_table[i].hash = hash;
-   catalog_depth_add(path);
-   g_files_used++;
-   if (g_files_used > g_peak_files) {
-      g_peak_files = g_files_used;
-   }
-   return g_table + i;
-}
+ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) { return create_catalog_entry_generic(path, hash, 0); }
+
+ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash) { return create_catalog_entry_generic(path, hash, 1); }
 
 int is_dir_prefix(const char *clean_path) {
    if (!g_table || g_files_used == 0) {
@@ -747,14 +804,20 @@ void fill_stat_buf(const ram_file_t *file, struct stat *buf) {
 
 int rfs_init(unsigned files_count, unsigned access_count) {
    rfs_destroy();
+   if (files_count == 0) {
+      files_count = 32;
+   }
+   if (access_count == 0) {
+      access_count = 16;
+   }
    size_t table_size = MIN_TABLE_SIZE;
    while (table_size < (size_t)files_count * 2) {
       table_size *= 2; /* facteur de charge <= 0,5 */
    }
-   g_files = calloc(files_count ? files_count : 1, sizeof(ram_file_t));
-   g_free_stack = malloc((files_count ? files_count : 1) * sizeof(unsigned));
+   g_files = calloc(files_count, sizeof(ram_file_t));
+   g_free_stack = malloc(files_count * sizeof(unsigned));
    g_table = calloc(table_size, sizeof(ram_catalog_t));
-   g_access_table = calloc(access_count ? access_count : 1, sizeof(ram_file_access_t));
+   g_access_table = calloc(access_count, sizeof(ram_file_access_t));
    if ((g_files == NULL) || (g_free_stack == NULL) || (g_table == NULL) || (g_access_table == NULL)) {
       errno = ENOMEM;
       rfs_destroy();
@@ -782,9 +845,7 @@ int rfs_init(unsigned files_count, unsigned access_count) {
    }
    g_free_top = files_count;
    /* Préchauffage du pool (Axe 4) : 1 slab de 16 blocs de 64 Ko (1 Mo) */
-   if (files_count > 0) {
-      allocate_slab();
-   }
+   allocate_slab();
    return 0;
 }
 
