@@ -3,6 +3,7 @@
  * Code de retour : 0 si tout passe, 1 sinon. */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -960,6 +961,240 @@ static void test_mkdir_and_rmdir(void) {
    rfs_destroy();
 }
 
+static void test_dup_and_truncate(void) {
+   rfs_destroy();
+   CHECK(rfs_init(10, 10) == 0);
+
+   /* 1. Test dup et partage de position offset */
+   int fd1 = rfs_open("file_dup.txt", O_CREAT | O_RDWR, 0644);
+   CHECK(fd1 >= 0);
+   CHECK(rfs_write(fd1, "0123456789abcdefghij", 20) == 20);
+
+   int fd2 = rfs_dup(fd1);
+   CHECK(fd2 >= 0 && fd2 != fd1);
+
+   /* L'offset initial est partagé */
+   CHECK(rfs_lseek(fd1, 5, SEEK_SET) == 5);
+   CHECK(rfs_lseek(fd2, 0, SEEK_CUR) == 5);
+
+   char buf[16] = {0};
+   CHECK(rfs_read(fd2, buf, 5) == 5);
+   CHECK(memcmp(buf, "56789", 5) == 0);
+
+   /* Lire sur fd2 a déplacé le curseur partagé pour fd1 */
+   CHECK(rfs_lseek(fd1, 0, SEEK_CUR) == 10);
+
+   /* Fermeture de fd1, fd2 reste fonctionnel */
+   CHECK(rfs_close(fd1) == 0);
+   memset(buf, 0, sizeof(buf));
+   CHECK(rfs_read(fd2, buf, 5) == 5);
+   CHECK(memcmp(buf, "abcde", 5) == 0);
+   CHECK(rfs_close(fd2) == 0);
+
+   /* 2. Test dup2 */
+   int fd3 = rfs_open("file_dup2.txt", O_CREAT | O_RDWR, 0644);
+   CHECK(fd3 >= 0);
+   int target_fd = 7;
+   CHECK(rfs_dup2(fd3, target_fd) == target_fd);
+   CHECK(rfs_lseek(fd3, 3, SEEK_SET) == 3);
+   CHECK(rfs_lseek(target_fd, 0, SEEK_CUR) == 3);
+   CHECK(rfs_close(fd3) == 0);
+   CHECK(rfs_close(target_fd) == 0);
+
+   /* Cas limites dup et dup2 */
+   CHECK_FAIL(rfs_dup(-1), -1, EBADF);
+   CHECK_FAIL(rfs_dup(99), -1, EBADF);
+   CHECK_FAIL(rfs_dup2(-1, 0), -1, EBADF);
+   CHECK_FAIL(rfs_dup2(0, -1), -1, EBADF);
+   int fd_self = rfs_open("self.txt", O_CREAT | O_RDWR, 0644);
+   CHECK(fd_self >= 0);
+   CHECK(rfs_dup2(fd_self, fd_self) == fd_self);
+   CHECK(rfs_close(fd_self) == 0);
+
+   /* 3. Test ftruncate et truncate */
+   int fdt = rfs_open("trunc.txt", O_CREAT | O_RDWR, 0644);
+   CHECK(fdt >= 0);
+   char pattern[100];
+   memset(pattern, 'A', sizeof(pattern));
+   CHECK(rfs_write(fdt, pattern, 100) == 100);
+
+   /* Réduction via ftruncate */
+   CHECK(rfs_ftruncate(fdt, 40) == 0);
+   struct stat st;
+   CHECK(rfs_fstat(fdt, &st) == 0);
+   CHECK(st.st_size == 40);
+
+   /* Extension via ftruncate comblée par des zéros */
+   CHECK(rfs_ftruncate(fdt, 80) == 0);
+   CHECK(rfs_fstat(fdt, &st) == 0);
+   CHECK(st.st_size == 80);
+
+   CHECK(rfs_lseek(fdt, 35, SEEK_SET) == 35);
+   char check_buf[15] = {0};
+   CHECK(rfs_read(fdt, check_buf, 10) == 10);
+   /* Les 5 premiers octets sont 'A', les 5 suivants sont 0x00 */
+   for (int i = 0; i < 5; i++) {
+      CHECK(check_buf[i] == 'A');
+   }
+   for (int i = 5; i < 10; i++) {
+      CHECK(check_buf[i] == 0);
+   }
+   CHECK(rfs_close(fdt) == 0);
+
+   /* Truncate par chemin */
+   CHECK(rfs_truncate("trunc.txt", 15) == 0);
+   CHECK(rfs_stat("trunc.txt", &st) == 0);
+   CHECK(st.st_size == 15);
+
+   /* Erreurs de troncature */
+   CHECK_FAIL(rfs_truncate("trunc.txt", -5), -1, EINVAL);
+   CHECK_FAIL(rfs_truncate("inexistant.txt", 10), -1, ENOENT);
+
+   rfs_destroy();
+}
+
+static void test_dirent_and_cwd(void) {
+   rfs_destroy();
+   CHECK(rfs_init(20, 20) == 0);
+
+   /* Création d'une arborescence */
+   CHECK(rfs_mkdir("root_dir", 0755) == 0);
+   CHECK(rfs_mkdir("root_dir/sub", 0755) == 0);
+   int f1 = rfs_open("root_dir/file1.txt", O_CREAT | O_WRONLY, 0644);
+   CHECK(f1 >= 0 && rfs_close(f1) == 0);
+   int f2 = rfs_open("root_dir/file2.bin", O_CREAT | O_WRONLY, 0644);
+   CHECK(f2 >= 0 && rfs_close(f2) == 0);
+   int f3 = rfs_open("outside.txt", O_CREAT | O_WRONLY, 0644);
+   CHECK(f3 >= 0 && rfs_close(f3) == 0);
+
+   /* 1. Test opendir et readdir sur root_dir */
+   rfs_dir_t *d = rfs_opendir("root_dir");
+   CHECK(d != NULL);
+
+   int found_dot = 0, found_dotdot = 0, found_sub = 0, found_f1 = 0, found_f2 = 0;
+   int total_entries = 0;
+   struct rfs_dirent *ent;
+   while ((ent = rfs_readdir(d)) != NULL) {
+      total_entries++;
+      if (strcmp(ent->d_name, ".") == 0) {
+         found_dot = 1;
+         CHECK(ent->d_type == DT_DIR);
+      } else if (strcmp(ent->d_name, "..") == 0) {
+         found_dotdot = 1;
+         CHECK(ent->d_type == DT_DIR);
+      } else if (strcmp(ent->d_name, "sub") == 0) {
+         found_sub = 1;
+         CHECK(ent->d_type == DT_DIR);
+      } else if (strcmp(ent->d_name, "file1.txt") == 0) {
+         found_f1 = 1;
+         CHECK(ent->d_type == DT_REG);
+      } else if (strcmp(ent->d_name, "file2.bin") == 0) {
+         found_f2 = 1;
+         CHECK(ent->d_type == DT_REG);
+      }
+   }
+   CHECK(total_entries == 5);
+   CHECK(found_dot && found_dotdot && found_sub && found_f1 && found_f2);
+   CHECK(rfs_readdir(d) == NULL);
+
+   /* Test rewinddir et telldir / seekdir */
+   CHECK(rfs_telldir(d) == 5);
+   rfs_rewinddir(d);
+   CHECK(rfs_telldir(d) == 0);
+   ent = rfs_readdir(d);
+   CHECK(ent != NULL && strcmp(ent->d_name, ".") == 0);
+
+   rfs_seekdir(d, 1);
+   ent = rfs_readdir(d);
+   CHECK(ent != NULL && strcmp(ent->d_name, "..") == 0);
+
+   CHECK(rfs_closedir(d) == 0);
+
+   /* Cas d'erreur opendir */
+   CHECK_FAIL(rfs_opendir("root_dir/file1.txt") == NULL ? -1 : 0, -1, ENOTDIR);
+   CHECK_FAIL(rfs_opendir("inexistant") == NULL ? -1 : 0, -1, ENOENT);
+   CHECK_FAIL(rfs_opendir(NULL) == NULL ? -1 : 0, -1, EINVAL);
+   CHECK_FAIL(rfs_closedir(NULL), -1, EBADF);
+   CHECK_FAIL(rfs_readdir(NULL) == NULL ? -1 : 0, -1, EBADF);
+
+   /* 2. Test chdir et getcwd */
+   char cwd[PATH_MAX] = {0};
+   CHECK(rfs_getcwd(cwd, sizeof(cwd)) != NULL);
+   CHECK(strcmp(cwd, "/") == 0);
+
+   CHECK(rfs_chdir("root_dir") == 0);
+   CHECK(rfs_getcwd(cwd, sizeof(cwd)) != NULL);
+   CHECK(strcmp(cwd, "/root_dir") == 0);
+
+   /* Accès relatif depuis root_dir */
+   struct stat st;
+   CHECK(rfs_stat("file1.txt", &st) == 0);
+   CHECK(rfs_stat("sub", &st) == 0 && S_ISDIR(st.st_mode));
+
+   /* Navigation dans sous-dossier */
+   CHECK(rfs_chdir("sub") == 0);
+   CHECK(rfs_getcwd(cwd, sizeof(cwd)) != NULL);
+   CHECK(strcmp(cwd, "/root_dir/sub") == 0);
+
+   /* Retour en arrière */
+   CHECK(rfs_chdir("..") == 0);
+   CHECK(rfs_getcwd(cwd, sizeof(cwd)) != NULL);
+   CHECK(strcmp(cwd, "/root_dir") == 0);
+
+   CHECK(rfs_chdir("/") == 0);
+   CHECK(rfs_getcwd(cwd, sizeof(cwd)) != NULL);
+   CHECK(strcmp(cwd, "/") == 0);
+
+   CHECK_FAIL(rfs_chdir("root_dir/file1.txt"), -1, ENOTDIR);
+   CHECK_FAIL(rfs_chdir("dossier_inconnu"), -1, ENOENT);
+
+   rfs_destroy();
+}
+
+static void test_tmpfile_and_getline(void) {
+   rfs_destroy();
+   CHECK(rfs_init(10, 10) == 0);
+
+   /* 1. Test tmpfile */
+   FILE *tmp = rfs_tmpfile();
+   CHECK(tmp != NULL);
+   CHECK(rfs_fprintf(tmp, "Ligne 1: Bonjour\nLigne 2: Monde\nDerniere ligne") > 0);
+   rfs_rewind(tmp);
+
+   /* 2. Test getline */
+   char *line = NULL;
+   size_t n = 0;
+   ssize_t read_bytes = rfs_getline(&line, &n, tmp);
+   CHECK(read_bytes > 0);
+   CHECK(strcmp(line, "Ligne 1: Bonjour\n") == 0);
+
+   read_bytes = rfs_getline(&line, &n, tmp);
+   CHECK(read_bytes > 0);
+   CHECK(strcmp(line, "Ligne 2: Monde\n") == 0);
+
+   read_bytes = rfs_getline(&line, &n, tmp);
+   CHECK(read_bytes > 0);
+   CHECK(strcmp(line, "Derniere ligne") == 0);
+
+   /* Fin de fichier */
+   read_bytes = rfs_getline(&line, &n, tmp);
+   CHECK(read_bytes == -1);
+   CHECK(rfs_feof(tmp) == 1);
+   free(line);
+
+   /* Vérification de la suppression automatique à la fermeture */
+   rfs_stats_t st;
+   CHECK(rfs_get_stats(&st) == 0);
+   CHECK(st.files_used == 1);
+
+   CHECK(rfs_fclose(tmp) == 0);
+
+   CHECK(rfs_get_stats(&st) == 0);
+   CHECK(st.files_used == 0); /* Nettoyé automatiquement ! */
+
+   rfs_destroy();
+}
+
 int main(void) {
    RUN(test_not_initialized);
    RUN(test_open_errors);
@@ -979,6 +1214,9 @@ int main(void) {
    RUN(test_save_load_archive);
    RUN(test_flex_and_index_layer);
    RUN(test_mkdir_and_rmdir);
+   RUN(test_dup_and_truncate);
+   RUN(test_dirent_and_cwd);
+   RUN(test_tmpfile_and_getline);
    {
       int before = g_failures;
       CHECK(test_macros() == 0);

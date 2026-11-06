@@ -10,6 +10,7 @@
 #define RAMFS_API __attribute__((visibility("default")))
 #endif
 
+#include <dirent.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -79,6 +80,38 @@ RAMFS_API int rfs_mkdir(const char *pathname, ...);
 RAMFS_API int rfs_rmdir(const char *pathname);
 RAMFS_API int rfs_isatty(rfs_handle_t fd);
 RAMFS_API int rfs_normalize_path(const char *src, char *dst, size_t dst_size);
+RAMFS_API int rfs_dup(rfs_handle_t oldfd);
+RAMFS_API int rfs_dup2(rfs_handle_t oldfd, rfs_handle_t newfd);
+RAMFS_API int rfs_ftruncate(rfs_handle_t fd, off_t length);
+RAMFS_API int rfs_truncate(const char *pathname, off_t length);
+
+#ifndef DT_UNKNOWN
+#define DT_UNKNOWN 0
+#endif
+#ifndef DT_DIR
+#define DT_DIR 4
+#endif
+#ifndef DT_REG
+#define DT_REG 8
+#endif
+
+struct rfs_dirent {
+   ino_t d_ino;
+   unsigned char d_type;
+   char d_name[256];
+};
+
+typedef struct rfs_dir rfs_dir_t;
+
+RAMFS_API rfs_dir_t *rfs_opendir(const char *name);
+RAMFS_API struct rfs_dirent *rfs_readdir(rfs_dir_t *dirp);
+RAMFS_API int rfs_closedir(rfs_dir_t *dirp);
+RAMFS_API void rfs_rewinddir(rfs_dir_t *dirp);
+RAMFS_API long rfs_telldir(rfs_dir_t *dirp);
+RAMFS_API void rfs_seekdir(rfs_dir_t *dirp, long loc);
+
+RAMFS_API int rfs_chdir(const char *path);
+RAMFS_API char *rfs_getcwd(char *buf, size_t size);
 
 RAMFS_API FILE *rfs_fopen(const char *pathname, const char *mode);
 RAMFS_API size_t rfs_fread(void *ptr, size_t size, size_t nmemb, FILE *stream);
@@ -100,6 +133,9 @@ RAMFS_API int rfs_fprintf(FILE *stream, const char *format, ...);
 RAMFS_API int rfs_vfprintf(FILE *stream, const char *format, va_list ap);
 RAMFS_API int rfs_fscanf(FILE *stream, const char *format, ...);
 RAMFS_API int rfs_fclose(FILE *stream);
+RAMFS_API FILE *rfs_tmpfile(void);
+RAMFS_API ssize_t rfs_getdelim(char **lineptr, size_t *n, int delimiter, FILE *stream);
+RAMFS_API ssize_t rfs_getline(char **lineptr, size_t *n, FILE *stream);
 
 /**
  * Sauvegarde une sélection ou la totalité des fichiers en mémoire vers une archive compressée (.tar.gz).
@@ -175,6 +211,40 @@ RAMFS_API int rfs_load_dir(const char *dir_path, const char *prefix);
 #define stat(path, buf) rfs_stat(path, buf)
 #undef fstat
 #define fstat(fd, buf) rfs_fstat(fd, buf)
+#undef dup
+#define dup(fd) rfs_dup(fd)
+#undef dup2
+#define dup2(oldfd, newfd) rfs_dup2(oldfd, newfd)
+#undef ftruncate
+#define ftruncate(fd, length) rfs_ftruncate(fd, length)
+#undef truncate
+#define truncate(path, length) rfs_truncate(path, length)
+
+#undef chdir
+#define chdir(path) rfs_chdir(path)
+#undef _chdir
+#define _chdir(path) rfs_chdir(path)
+#undef getcwd
+#define getcwd(buf, sz) rfs_getcwd(buf, sz)
+#undef _getcwd
+#define _getcwd(buf, sz) rfs_getcwd(buf, sz)
+
+#undef DIR
+#define DIR rfs_dir_t
+#undef dirent
+#define dirent rfs_dirent
+#undef opendir
+#define opendir(name) rfs_opendir(name)
+#undef readdir
+#define readdir(dirp) rfs_readdir(dirp)
+#undef closedir
+#define closedir(dirp) rfs_closedir(dirp)
+#undef rewinddir
+#define rewinddir(dirp) rfs_rewinddir(dirp)
+#undef telldir
+#define telldir(dirp) rfs_telldir(dirp)
+#undef seekdir
+#define seekdir(dirp, loc) rfs_seekdir(dirp, loc)
 
 #undef fopen
 #define fopen(path, mode) rfs_fopen(path, mode)
@@ -220,5 +290,11 @@ RAMFS_API int rfs_load_dir(const char *dir_path, const char *prefix);
 #define fscanf(...) rfs_fscanf(__VA_ARGS__)
 #undef fclose
 #define fclose(st) rfs_fclose(st)
+#undef tmpfile
+#define tmpfile() rfs_tmpfile()
+#undef getline
+#define getline(lineptr, n, st) rfs_getline(lineptr, n, st)
+#undef getdelim
+#define getdelim(lineptr, n, delim, st) rfs_getdelim(lineptr, n, delim, st)
 
 #endif

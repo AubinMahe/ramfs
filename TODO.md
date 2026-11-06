@@ -102,3 +102,22 @@ Fonctions implémentées et redirigées :
   - `rfs_stat` positionne `S_IFDIR | 0755` pour les répertoires.
   - `rfs_access` autorise `X_OK` sur les répertoires virtuels.
   - `rfs_save_archive`, `rfs_save_dir` et `rfs_load` prennent en charge les dossiers (typeflag `'5'` dans les archives `.tar.gz`, création récursive sur disque sans appel erroné à `fopen`).
+
+---
+
+## 8. Priorité Haute : Complétude POSIX, Navigation d'arborescence & Flux étendus (v1.1.0) - [FAIT]
+
+Standardisation POSIX complète permettant l'inspection des arborescences, la navigation dynamique, la duplication de descripteurs et les flux stdio avancés.
+
+Fonctions implémentées et redirigées :
+
+- [x] **Inspection de répertoires (`<dirent.h>`) : `opendir`, `readdir`, `closedir`, `rewinddir`, `telldir`, `seekdir`** :
+  - *Comportement :* `opendir` capture un instantané cohérent des enfants directs avec insertion standard de `.` et `..` et filtrage des doublons (`DT_DIR`, `DT_REG`, `d_ino`). Support de la reprise de position (`telldir`/`seekdir`) et remise à zéro (`rewinddir`).
+- [x] **Répertoire courant de travail virtuel : `chdir`, `_chdir`, `getcwd`, `_getcwd`** :
+  - *Comportement :* Maintien d'un contexte de travail virtuel `g_cwd` initialisé à `"/"`. Résolution transparente des chemins relatifs (`resolve_path`) pour toutes les opérations du catalogue (`open`, `stat`, `unlink`, `mkdir`, etc.).
+- [x] **Duplication de descripteurs POSIX : `dup`, `dup2`** :
+  - *Comportement :* Structure de curseur partagé (`ram_shared_offset_t`) assurant que deux descripteurs dupliqués partagent rigoureusement le même décalage (`offset`) en lecture et écriture, avec libération sûre lors de la fermeture du dernier handle.
+- [x] **Troncature de fichiers : `ftruncate`, `truncate`** :
+  - *Comportement :* Réduction immédiate ou extension de capacité comblée par des octets nuls (`0x00`), par handle ou par chemin.
+- [x] **Flux étendus stdio : `tmpfile`, `getline`, `getdelim`** :
+  - *Comportement :* `tmpfile` alloue un flux temporaire en mémoire automatiquement détruit et désalloué à la fermeture (`fclose`). `getline`/`getdelim` effectuent une lecture dynamique délimitée avec allocation automatique de tampon.

@@ -185,6 +185,58 @@ int test_macros(void) {
    EXPECT(_rmdir("macro_dir2") == 0);
    EXPECT(access("macro_dir2", F_OK) != 0);
 
+   /* dup, dup2, ftruncate, truncate via macros */
+   int fd_m = open("macro_dup.dat", O_CREAT | O_RDWR, 0644);
+   EXPECT(fd_m >= 0);
+   EXPECT(write(fd_m, "hello world test", 16) == 16);
+   int fd_m2 = dup(fd_m);
+   EXPECT(fd_m2 >= 0);
+   EXPECT(lseek(fd_m, 6, SEEK_SET) == 6);
+   EXPECT(lseek(fd_m2, 0, SEEK_CUR) == 6);
+   EXPECT(close(fd_m) == 0);
+   EXPECT(ftruncate(fd_m2, 5) == 0);
+   EXPECT(close(fd_m2) == 0);
+   EXPECT(truncate("macro_dup.dat", 4) == 0);
+   EXPECT(stat("macro_dup.dat", &st) == 0 && st.st_size == 4);
+   EXPECT(unlink("macro_dup.dat") == 0);
+
+   /* chdir, getcwd, _chdir, _getcwd, opendir, readdir, closedir via macros */
+   EXPECT(mkdir("dir_macro", 0755) == 0);
+   int f_in_dir = open("dir_macro/f.txt", O_CREAT | O_WRONLY, 0644);
+   EXPECT(f_in_dir >= 0 && close(f_in_dir) == 0);
+
+   DIR *d_m = opendir("dir_macro");
+   EXPECT(d_m != NULL);
+   int cnt = 0;
+   struct dirent *ent_m;
+   while ((ent_m = readdir(d_m)) != NULL) {
+      cnt++;
+   }
+   EXPECT(cnt == 3); /* ., .., f.txt */
+   EXPECT(closedir(d_m) == 0);
+
+   char cwd_buf[256];
+   EXPECT(getcwd(cwd_buf, sizeof(cwd_buf)) != NULL);
+   EXPECT(chdir("dir_macro") == 0);
+   EXPECT(stat("f.txt", &st) == 0);
+   EXPECT(chdir("..") == 0);
+   EXPECT(unlink("dir_macro/f.txt") == 0);
+   EXPECT(rmdir("dir_macro") == 0);
+
+   /* tmpfile et getline via macros */
+   FILE *t_m = tmpfile();
+   EXPECT(t_m != NULL);
+   EXPECT(fprintf(t_m, "macro line 1\nmacro line 2\n") > 0);
+   rewind(t_m);
+   char *l_m = NULL;
+   size_t n_m = 0;
+   EXPECT(getline(&l_m, &n_m, t_m) > 0);
+   EXPECT(strcmp(l_m, "macro line 1\n") == 0);
+   EXPECT(getline(&l_m, &n_m, t_m) > 0);
+   EXPECT(strcmp(l_m, "macro line 2\n") == 0);
+   free(l_m);
+   EXPECT(fclose(t_m) == 0);
+
    rfs_destroy();
    return g_fail;
 }

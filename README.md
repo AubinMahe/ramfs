@@ -2,8 +2,6 @@
 
 Bibliothèque C (C11) autonome, multiplateforme (Linux & Windows) et haute performance, conçue pour émuler les entrées/sorties fichiers standard (POSIX et `<stdio.h>`) directement en mémoire vive.
 
----
-
 ## Contexte & Problématique
 
 Dans les anciennes applications, de nombreux modules utilisent intensivement le système de fichiers pour stocker des états intermédiaires, faute de disposer de capacité mémoire suffisante à l'époque.
@@ -15,8 +13,6 @@ Sur des architectures modernes, ces opérations génèrent des millions d'appels
 * **Redirection transparente :** En activant `#define USE_RAMFS`, les fonctions standard (`open`, `read`, `fopen`, `fprintf`, etc.) sont redirigées sans modifier une seule ligne du code métier legacy.
 * **Zéro E/S disque :** Les fichiers vivent exclusivement en RAM.
 * **Persistance à la demande :** Sauvegarde sélective sur disque ou dans une archive compressée `.tar.gz` en fin de traitement.
-
----
 
 ## Architecture & Choix Techniques
 
@@ -58,8 +54,6 @@ Sur des architectures modernes, ces opérations génèrent des millions d'appels
 >
 > **Parallélisme multi-processus :** En revanche, `ramfs` est idéal pour exécuter plusieurs instances d'applications en parallèle (multi-processus, workers batch). Chaque processus disposant de son propre espace d'adressage isolé en RAM, la concurrence s'effectue sans aucune collision de noms de fichiers réels, sans verrous système et sans saturation de bande passante disque.
 
----
-
 ## Sauvegarde & Chargement : `rfs_save_*` / `rfs_load`
 
 Des fonctions dédiées permettent d'exporter et d'importer l'état mémoire :
@@ -82,16 +76,12 @@ int rfs_load_dir(const char *dir_path, const char *prefix);
 * **Arborescence relative :** L'organisation hiérarchique des dossiers (ex: `dir/sub/file.dat`) est intégralement préservée.
 * **Relocalisation :** Le paramètre `prefix` de `rfs_load` permet de restaurer une archive sous un sous-dossier virtuel en mémoire.
 
----
-
 ## Performances & Mesures
 
 Sur un scénario de **4 000 fichiers** manipulés (création, écriture de 512 octets, double relecture) :
 
 * **Vitesse brute :** `ramfs` est mesuré **25x à 30x plus rapide** que le système de fichiers réel sur SSD (sans `fsync`/`fflush`).
 * **Régime établi (*steady state*) :** Une fois les fichiers initialisés, `ramfs` réutilise ses tampons existants (`O_TRUNC`), éliminant 100 % des allocations dynamiques (`malloc`) et des *page-faults* du système d'exploitation.
-
----
 
 ## Compilation & Assurance Qualité (QA)
 
@@ -122,3 +112,7 @@ sudo dnf install -y gcc make zlib-devel mingw64-gcc mingw64-zlib valgrind wine
 | `make perf` | Mesure des compteurs matériels et profilage CPU via Linux `perf` |
 | `make format-sources`| Formate l'ensemble des sources (`.c`, `.h`) selon `.clang-format` |
 | `make clean` | Nettoie tous les répertoires de compilation |
+
+## License
+
+GPL-3.0-or-later. See [LICENSE.txt](LICENSE.txt).

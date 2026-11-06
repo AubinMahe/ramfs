@@ -48,12 +48,21 @@ typedef struct {
 } ram_catalog_t;
 
 typedef struct {
-   ram_file_t *file;
    off_t offset;
+   unsigned ref_count;
+} ram_shared_offset_t;
+
+typedef struct {
+   ram_file_t *file;
+   ram_shared_offset_t *shared_offset;
    int flags;
    int eof;
    int error;
+   int is_tmpfile;
 } ram_file_access_t;
+
+/* Répertoire de travail virtuel */
+static char g_cwd[PATH_MAX] = "/";
 
 /* Pool de fichiers + pile des indices libres */
 static ram_file_t *g_files = NULL;
@@ -97,6 +106,7 @@ int rfs_init(unsigned files_count, unsigned access_count) {
    g_peak_files = 0;
    g_access_used = 0;
    g_peak_access = 0;
+   snprintf(g_cwd, sizeof(g_cwd), "/");
    /* indices poussés en ordre décroissant : le 0 sort en premier */
    for (unsigned i = 0; i < files_count; i++) {
       g_free_stack[i] = files_count - 1 - i;
@@ -122,8 +132,17 @@ void rfs_destroy(void) {
       free(g_free_stack);
    }
    if (g_access_table) {
+      for (unsigned i = 0; i < g_access_capacity; i++) {
+         if (g_access_table[i].shared_offset) {
+            if (--g_access_table[i].shared_offset->ref_count == 0) {
+               free(g_access_table[i].shared_offset);
+            }
+            g_access_table[i].shared_offset = NULL;
+         }
+      }
       free(g_access_table);
    }
+   snprintf(g_cwd, sizeof(g_cwd), "/");
    g_table = NULL;
    g_table_mask = 0;
    g_files = NULL;
@@ -391,6 +410,27 @@ int rfs_normalize_path(const char *src, char *dst, size_t dst_size) {
    return 0;
 }
 
+static int resolve_path(const char *src, char *dst, size_t dst_size) {
+   if (!src || !dst || dst_size == 0) {
+      errno = EINVAL;
+      return -1;
+   }
+   int is_absolute = (src[0] == '/' || src[0] == '\\' || (isalpha((unsigned char)src[0]) && src[1] == ':'));
+   if (!is_absolute && g_cwd[0] != '\0' && strcmp(g_cwd, "/") != 0 && strcmp(g_cwd, ".") != 0) {
+      char combined[PATH_MAX * 2];
+      const char *cwd_sub = (g_cwd[0] == '/') ? g_cwd + 1 : g_cwd;
+      if (cwd_sub[0] != '\0') {
+         int ret = snprintf(combined, sizeof(combined), "%s/%s", cwd_sub, src);
+         if (ret < 0 || (size_t)ret >= sizeof(combined)) {
+            errno = ENAMETOOLONG;
+            return -1;
+         }
+         return rfs_normalize_path(combined, dst, dst_size);
+      }
+   }
+   return rfs_normalize_path(src, dst, dst_size);
+}
+
 rfs_handle_t rfs_open(const char *pathname, int flags, ...) {
    if ((g_files == NULL) || (g_access_table == NULL)) {
       errno = ENODEV;
@@ -401,7 +441,7 @@ rfs_handle_t rfs_open(const char *pathname, int flags, ...) {
       return RFS_INVALID_HANDLE;
    }
    char clean_path[PATH_MAX];
-   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (resolve_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return RFS_INVALID_HANDLE;
    }
    if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0) {
@@ -456,15 +496,24 @@ rfs_handle_t rfs_open(const char *pathname, int flags, ...) {
       errno = ENOMEM;
       return RFS_INVALID_HANDLE;
    }
+   ram_shared_offset_t *so = malloc(sizeof(ram_shared_offset_t));
+   if (!so) {
+      errno = ENOMEM;
+      return RFS_INVALID_HANDLE;
+   }
+   so->offset = (flags & O_APPEND) ? (off_t)file->size : 0;
+   so->ref_count = 1;
+
    if (flags & O_TRUNC) {
       file->size = 0;
    }
    ram_file_access_t *access = g_access_table + free_slot;
    access->file = file;
+   access->shared_offset = so;
    access->flags = flags;
-   access->offset = (flags & O_APPEND) ? (off_t)file->size : 0;
    access->eof = 0;
    access->error = 0;
+   access->is_tmpfile = 0;
    g_access_used++;
    if (g_access_used > g_peak_access) {
       g_peak_access = g_access_used;
@@ -482,16 +531,16 @@ ssize_t rfs_read(rfs_handle_t fd, void *buf, size_t count) {
       return -1;
    }
    ram_file_t *file = acc->file;
-   if (acc->offset >= (off_t)file->size) {
+   if (acc->shared_offset->offset >= (off_t)file->size) {
       if (count > 0) {
          acc->eof = 1;
       }
       return 0;
    }
-   size_t available = file->size - (size_t)acc->offset;
+   size_t available = file->size - (size_t)acc->shared_offset->offset;
    size_t to_read = count > available ? available : count;
-   memcpy(buf, file->data + acc->offset, to_read);
-   acc->offset += (off_t)to_read;
+   memcpy(buf, file->data + acc->shared_offset->offset, to_read);
+   acc->shared_offset->offset += (off_t)to_read;
    if (count > available) {
       acc->eof = 1;
    }
@@ -509,9 +558,9 @@ ssize_t rfs_write(rfs_handle_t fd, const void *buf, size_t count) {
    }
    ram_file_t *file = acc->file;
    if (acc->flags & O_APPEND) {
-      acc->offset = (off_t)file->size;
+      acc->shared_offset->offset = (off_t)file->size;
    }
-   size_t required_size = (size_t)acc->offset + count;
+   size_t required_size = (size_t)acc->shared_offset->offset + count;
    if (required_size > file->capacity) {
       size_t new_capacity = file->capacity == 0 ? RAMFS_INITIAL_CAPACITY : file->capacity * 2;
       while (new_capacity < required_size) {
@@ -526,14 +575,14 @@ ssize_t rfs_write(rfs_handle_t fd, const void *buf, size_t count) {
       file->data = new_data;
       file->capacity = new_capacity;
    }
-   if ((size_t)acc->offset > file->size) {
+   if ((size_t)acc->shared_offset->offset > file->size) {
       /* écriture après un lseek au-delà de la fin : le trou est rempli de zéros */
-      memset(file->data + file->size, 0, (size_t)acc->offset - file->size);
+      memset(file->data + file->size, 0, (size_t)acc->shared_offset->offset - file->size);
    }
-   memcpy(file->data + acc->offset, buf, count);
-   acc->offset += (off_t)count;
-   if ((size_t)acc->offset > file->size) {
-      file->size = (size_t)acc->offset;
+   memcpy(file->data + acc->shared_offset->offset, buf, count);
+   acc->shared_offset->offset += (off_t)count;
+   if ((size_t)acc->shared_offset->offset > file->size) {
+      file->size = (size_t)acc->shared_offset->offset;
    }
    return (ssize_t)count;
 }
@@ -543,7 +592,7 @@ off_t rfs_lseek(rfs_handle_t fd, off_t offset, int whence) {
    if (!acc) {
       return -1;
    }
-   off_t new_offset = acc->offset;
+   off_t new_offset = acc->shared_offset->offset;
    switch (whence) {
    case SEEK_SET:
       new_offset = offset;
@@ -562,15 +611,21 @@ off_t rfs_lseek(rfs_handle_t fd, off_t offset, int whence) {
       errno = EINVAL;
       return -1;
    }
-   acc->offset = new_offset;
+   acc->shared_offset->offset = new_offset;
    acc->eof = 0;
-   return acc->offset;
+   return acc->shared_offset->offset;
 }
 
 int rfs_close(rfs_handle_t fd) {
    ram_file_access_t *acc = get_access(fd);
    if (!acc) {
       return -1;
+   }
+   if (acc->shared_offset) {
+      if (--acc->shared_offset->ref_count == 0) {
+         free(acc->shared_offset);
+      }
+      acc->shared_offset = NULL;
    }
    memset(acc, 0, sizeof(ram_file_access_t));
    if (g_access_used > 0) {
@@ -589,7 +644,7 @@ int rfs_unlink(const char *pathname) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (resolve_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return -1;
    }
    if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0) {
@@ -638,7 +693,7 @@ int rfs_remove(const char *pathname) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (resolve_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return -1;
    }
    ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
@@ -679,7 +734,7 @@ int rfs_stat(const char *pathname, struct stat *buf) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (resolve_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return -1;
    }
    ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
@@ -721,8 +776,7 @@ int rfs_rename(const char *oldpath, const char *newpath) {
    }
    char clean_old[PATH_MAX];
    char clean_new[PATH_MAX];
-   if (rfs_normalize_path(oldpath, clean_old, sizeof(clean_old)) != 0 ||
-       rfs_normalize_path(newpath, clean_new, sizeof(clean_new)) != 0) {
+   if (resolve_path(oldpath, clean_old, sizeof(clean_old)) != 0 || resolve_path(newpath, clean_new, sizeof(clean_new)) != 0) {
       return -1;
    }
    if (strcmp(clean_old, clean_new) == 0) {
@@ -830,7 +884,7 @@ int rfs_access(const char *pathname, int mode) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (resolve_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return -1;
    }
    ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
@@ -864,7 +918,7 @@ int rfs_mkdir(const char *pathname, ...) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (resolve_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return -1;
    }
    if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0) {
@@ -912,7 +966,7 @@ int rfs_rmdir(const char *pathname) {
       return -1;
    }
    char clean_path[PATH_MAX];
-   if (rfs_normalize_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+   if (resolve_path(pathname, clean_path, sizeof(clean_path)) != 0) {
       return -1;
    }
    if (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0) {
@@ -1105,8 +1159,8 @@ void rfs_rewind(FILE *stream) {
       return;
    }
    ram_file_access_t *acc = get_access(handle);
-   if (acc) {
-      acc->offset = 0;
+   if (acc && acc->shared_offset) {
+      acc->shared_offset->offset = 0;
       acc->eof = 0;
       acc->error = 0;
    }
@@ -1201,11 +1255,11 @@ int rfs_ungetc(int c, FILE *stream) {
       }
       return EOF;
    }
-   if (acc->offset <= 0) {
+   if (acc->shared_offset->offset <= 0) {
       return EOF;
    }
-   acc->offset--;
-   acc->file->data[acc->offset] = (unsigned char)c;
+   acc->shared_offset->offset--;
+   acc->file->data[acc->shared_offset->offset] = (unsigned char)c;
    acc->eof = 0;
    return (int)(unsigned char)c;
 }
@@ -1225,11 +1279,11 @@ int rfs_fgetc(FILE *stream) {
       return EOF;
    }
    ram_file_t *file = acc->file;
-   if (acc->offset >= (off_t)file->size) {
+   if (acc->shared_offset->offset >= (off_t)file->size) {
       acc->eof = 1;
       return EOF;
    }
-   unsigned char c = file->data[acc->offset++];
+   unsigned char c = file->data[acc->shared_offset->offset++];
    return (int)c;
 }
 
@@ -1252,13 +1306,13 @@ char *rfs_fgets(char *s, int size, FILE *stream) {
       return NULL;
    }
    ram_file_t *file = acc->file;
-   if (acc->offset >= (off_t)file->size) {
+   if (acc->shared_offset->offset >= (off_t)file->size) {
       acc->eof = 1;
       return NULL;
    }
    int i = 0;
-   while (i < size - 1 && acc->offset < (off_t)file->size) {
-      char c = (char)file->data[acc->offset++];
+   while (i < size - 1 && acc->shared_offset->offset < (off_t)file->size) {
+      char c = (char)file->data[acc->shared_offset->offset++];
       s[i++] = c;
       if (c == '\n') {
          break;
@@ -1367,19 +1421,19 @@ int rfs_fscanf(FILE *stream, const char *format, ...) {
       return -1;
    }
    ram_file_t *file = acc->file;
-   if (acc->offset >= (off_t)file->size) {
+   if (acc->shared_offset->offset >= (off_t)file->size) {
       acc->eof = 1;
       return EOF;
    }
    /* vsscanf exige une chaîne terminée par '\0' : on travaille sur une copie. */
-   size_t remaining = file->size - (size_t)acc->offset;
+   size_t remaining = file->size - (size_t)acc->shared_offset->offset;
    char *text = malloc(remaining + 1);
    if (!text) {
       acc->error = 1;
       errno = ENOMEM;
       return -1;
    }
-   memcpy(text, file->data + acc->offset, remaining);
+   memcpy(text, file->data + acc->shared_offset->offset, remaining);
    text[remaining] = '\0';
    size_t fmt_len = strlen(format);
    va_list args;
@@ -1416,7 +1470,7 @@ int rfs_fscanf(FILE *stream, const char *format, ...) {
 #pragma GCC diagnostic pop
 #endif
       if (bytes_consumed > 0) {
-         acc->offset += bytes_consumed;
+         acc->shared_offset->offset += bytes_consumed;
       }
       free(suppress_format);
    }
@@ -1425,13 +1479,515 @@ int rfs_fscanf(FILE *stream, const char *format, ...) {
 }
 
 int rfs_fclose(FILE *stream) {
+   if (!stream) {
+      errno = EBADF;
+      return -1;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       errno = EBADF;
       return -1;
    }
-   return rfs_close(handle);
+   ram_file_access_t *acc = get_access(handle);
+   if (!acc) {
+      return -1;
+   }
+   int is_tmp = acc->is_tmpfile;
+   ram_file_t *tmp_file = is_tmp ? acc->file : NULL;
+   int res = rfs_close(handle);
+   if (res == 0 && is_tmp && tmp_file) {
+      for (size_t i = 0; i <= g_table_mask; i++) {
+         if (g_table[i].file == tmp_file && g_table[i].path != NULL) {
+            char *tmp_path = strdup(g_table[i].path);
+            if (tmp_path) {
+               rfs_unlink(tmp_path);
+               free(tmp_path);
+            }
+            break;
+         }
+      }
+   }
+   return res;
 }
+
+int rfs_dup(rfs_handle_t oldfd) {
+   ram_file_access_t *old_acc = get_access(oldfd);
+   if (!old_acc) {
+      return -1;
+   }
+   rfs_handle_t free_slot = RFS_INVALID_HANDLE;
+   for (unsigned i = 0; i < g_access_capacity; i++) {
+      if (g_access_table[i].file == NULL) {
+         free_slot = (rfs_handle_t)i;
+         break;
+      }
+   }
+   if (free_slot == RFS_INVALID_HANDLE) {
+      errno = EMFILE;
+      return -1;
+   }
+   ram_file_access_t *new_acc = g_access_table + free_slot;
+   new_acc->file = old_acc->file;
+   new_acc->shared_offset = old_acc->shared_offset;
+   new_acc->shared_offset->ref_count++;
+   new_acc->flags = old_acc->flags;
+   new_acc->eof = old_acc->eof;
+   new_acc->error = old_acc->error;
+   new_acc->is_tmpfile = old_acc->is_tmpfile;
+   g_access_used++;
+   if (g_access_used > g_peak_access) {
+      g_peak_access = g_access_used;
+   }
+   return free_slot;
+}
+
+int rfs_dup2(rfs_handle_t oldfd, rfs_handle_t newfd) {
+   ram_file_access_t *old_acc = get_access(oldfd);
+   if (!old_acc) {
+      return -1;
+   }
+   if (newfd < 0 || (unsigned)newfd >= g_access_capacity) {
+      errno = EBADF;
+      return -1;
+   }
+   if (oldfd == newfd) {
+      return newfd;
+   }
+   if (g_access_table[newfd].file != NULL) {
+      rfs_close(newfd);
+   }
+   ram_file_access_t *new_acc = g_access_table + newfd;
+   new_acc->file = old_acc->file;
+   new_acc->shared_offset = old_acc->shared_offset;
+   new_acc->shared_offset->ref_count++;
+   new_acc->flags = old_acc->flags;
+   new_acc->eof = old_acc->eof;
+   new_acc->error = old_acc->error;
+   new_acc->is_tmpfile = old_acc->is_tmpfile;
+   g_access_used++;
+   if (g_access_used > g_peak_access) {
+      g_peak_access = g_access_used;
+   }
+   return newfd;
+}
+
+int rfs_ftruncate(rfs_handle_t fd, off_t length) {
+   if (length < 0) {
+      errno = EINVAL;
+      return -1;
+   }
+   ram_file_access_t *acc = get_access(fd);
+   if (!acc) {
+      return -1;
+   }
+   if ((acc->flags & O_ACCMODE) == O_RDONLY) {
+      errno = EINVAL;
+      return -1;
+   }
+   ram_file_t *file = acc->file;
+   size_t new_len = (size_t)length;
+   if (new_len > file->capacity) {
+      size_t new_cap = file->capacity == 0 ? RAMFS_INITIAL_CAPACITY : file->capacity * 2;
+      while (new_cap < new_len) {
+         new_cap *= 2;
+      }
+      unsigned char *new_data = realloc(file->data, new_cap);
+      if (!new_data) {
+         acc->error = 1;
+         errno = ENOMEM;
+         return -1;
+      }
+      file->data = new_data;
+      file->capacity = new_cap;
+   }
+   if (new_len > file->size) {
+      memset(file->data + file->size, 0, new_len - file->size);
+   }
+   file->size = new_len;
+   return 0;
+}
+
+int rfs_truncate(const char *pathname, off_t length) {
+   if (!pathname || length < 0) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (!g_files || !g_table) {
+      errno = ENODEV;
+      return -1;
+   }
+   char clean_path[PATH_MAX];
+   if (resolve_path(pathname, clean_path, sizeof(clean_path)) != 0) {
+      return -1;
+   }
+   ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
+   if (!entry || !entry->file) {
+      if (is_dir_prefix(clean_path)) {
+         errno = EISDIR;
+         return -1;
+      }
+      errno = ENOENT;
+      return -1;
+   }
+   ram_file_t *file = entry->file;
+   if (file->is_dir) {
+      errno = EISDIR;
+      return -1;
+   }
+   size_t new_len = (size_t)length;
+   if (new_len > file->capacity) {
+      size_t new_cap = file->capacity == 0 ? RAMFS_INITIAL_CAPACITY : file->capacity * 2;
+      while (new_cap < new_len) {
+         new_cap *= 2;
+      }
+      unsigned char *new_data = realloc(file->data, new_cap);
+      if (!new_data) {
+         errno = ENOMEM;
+         return -1;
+      }
+      file->data = new_data;
+      file->capacity = new_cap;
+   }
+   if (new_len > file->size) {
+      memset(file->data + file->size, 0, new_len - file->size);
+   }
+   file->size = new_len;
+   return 0;
+}
+
+int rfs_chdir(const char *path) {
+   if (!path) {
+      errno = EINVAL;
+      return -1;
+   }
+   if (!g_files || !g_table) {
+      errno = ENODEV;
+      return -1;
+   }
+   char target[PATH_MAX];
+   if (resolve_path(path, target, sizeof(target)) != 0) {
+      return -1;
+   }
+   if (target[0] == '\0' || strcmp(target, "/") == 0 || strcmp(target, ".") == 0) {
+      snprintf(g_cwd, sizeof(g_cwd), "/");
+      return 0;
+   }
+   ram_catalog_t *entry = search_in_catalog(target, hash_path(target));
+   if (entry) {
+      if (!entry->file->is_dir) {
+         errno = ENOTDIR;
+         return -1;
+      }
+   } else if (!is_dir_prefix(target)) {
+      errno = ENOENT;
+      return -1;
+   }
+   size_t tlen = strlen(target);
+   if (target[0] != '/') {
+      if (tlen + 2 > sizeof(g_cwd)) {
+         errno = ENAMETOOLONG;
+         return -1;
+      }
+      g_cwd[0] = '/';
+      memcpy(g_cwd + 1, target, tlen + 1);
+   } else {
+      if (tlen + 1 > sizeof(g_cwd)) {
+         errno = ENAMETOOLONG;
+         return -1;
+      }
+      memcpy(g_cwd, target, tlen + 1);
+   }
+   return 0;
+}
+
+char *rfs_getcwd(char *buf, size_t size) {
+   if (!g_files || !g_table) {
+      errno = ENODEV;
+      return NULL;
+   }
+   size_t len = strlen(g_cwd);
+   if (buf == NULL) {
+      size_t alloc_sz = (size > len + 1) ? size : (len + 1);
+      buf = malloc(alloc_sz);
+      if (!buf) {
+         errno = ENOMEM;
+         return NULL;
+      }
+      memcpy(buf, g_cwd, len + 1);
+      return buf;
+   }
+   if (size == 0) {
+      errno = EINVAL;
+      return NULL;
+   }
+   if (len + 1 > size) {
+      errno = ERANGE;
+      return NULL;
+   }
+   memcpy(buf, g_cwd, len + 1);
+   return buf;
+}
+
+struct rfs_dir {
+   struct rfs_dirent *entries;
+   size_t count;
+   size_t current_idx;
+   struct rfs_dirent current;
+};
+
+static int add_dirent(struct rfs_dirent **entries, size_t *count, size_t *cap, ino_t ino, unsigned char type, const char *name) {
+   for (size_t i = 0; i < *count; i++) {
+      if (strcmp((*entries)[i].d_name, name) == 0) {
+         return 0;
+      }
+   }
+   if (*count >= *cap) {
+      size_t new_cap = (*cap == 0) ? 16 : (*cap * 2);
+      struct rfs_dirent *new_arr = realloc(*entries, new_cap * sizeof(struct rfs_dirent));
+      if (!new_arr) {
+         return -1;
+      }
+      *entries = new_arr;
+      *cap = new_cap;
+   }
+   struct rfs_dirent *ent = &(*entries)[*count];
+   ent->d_ino = ino;
+   ent->d_type = type;
+   strncpy(ent->d_name, name, sizeof(ent->d_name) - 1);
+   ent->d_name[sizeof(ent->d_name) - 1] = '\0';
+   (*count)++;
+   return 0;
+}
+
+rfs_dir_t *rfs_opendir(const char *name) {
+   if (!name) {
+      errno = EINVAL;
+      return NULL;
+   }
+   if (!g_files || !g_table) {
+      errno = ENODEV;
+      return NULL;
+   }
+   char clean_path[PATH_MAX];
+   if (resolve_path(name, clean_path, sizeof(clean_path)) != 0) {
+      return NULL;
+   }
+
+   int is_root = (clean_path[0] == '\0' || strcmp(clean_path, ".") == 0 || strcmp(clean_path, "/") == 0);
+   if (!is_root) {
+      ram_catalog_t *entry = search_in_catalog(clean_path, hash_path(clean_path));
+      if (entry) {
+         if (!entry->file->is_dir) {
+            errno = ENOTDIR;
+            return NULL;
+         }
+      } else if (!is_dir_prefix(clean_path)) {
+         errno = ENOENT;
+         return NULL;
+      }
+   }
+
+   rfs_dir_t *dir = calloc(1, sizeof(rfs_dir_t));
+   if (!dir) {
+      errno = ENOMEM;
+      return NULL;
+   }
+
+   size_t cap = 0;
+   if (add_dirent(&dir->entries, &dir->count, &cap, 1, DT_DIR, ".") != 0 ||
+       add_dirent(&dir->entries, &dir->count, &cap, 2, DT_DIR, "..") != 0) {
+      free(dir->entries);
+      free(dir);
+      errno = ENOMEM;
+      return NULL;
+   }
+
+   char prefix[PATH_MAX + 2];
+   size_t prefix_len = 0;
+   if (!is_root) {
+      size_t clen = strlen(clean_path);
+      if (clen + 2 > sizeof(prefix)) {
+         errno = ENAMETOOLONG;
+         return NULL;
+      }
+      memcpy(prefix, clean_path, clen);
+      prefix[clen] = '/';
+      prefix[clen + 1] = '\0';
+      prefix_len = clen + 1;
+   }
+
+   for (size_t i = 0; i <= g_table_mask; i++) {
+      const ram_catalog_t *e = g_table + i;
+      if (!e->path || !e->file) {
+         continue;
+      }
+      const char *sub = NULL;
+      if (is_root) {
+         const char *p = (e->path[0] == '/') ? e->path + 1 : e->path;
+         if (p[0] == '\0' || strcmp(p, ".") == 0) {
+            continue;
+         }
+         sub = p;
+      } else {
+         if (strncmp(e->path, prefix, prefix_len) == 0) {
+            sub = e->path + prefix_len;
+         }
+      }
+
+      if (sub && sub[0] != '\0') {
+         const char *slash = strchr(sub, '/');
+         if (!slash) {
+            unsigned char type = e->file->is_dir ? DT_DIR : DT_REG;
+            ino_t ino = (ino_t)((size_t)(e->file - g_files) + 10);
+            if (add_dirent(&dir->entries, &dir->count, &cap, ino, type, sub) != 0) {
+               free(dir->entries);
+               free(dir);
+               errno = ENOMEM;
+               return NULL;
+            }
+         } else {
+            char dir_name[256];
+            size_t comp_len = (size_t)(slash - sub);
+            if (comp_len >= sizeof(dir_name)) {
+               comp_len = sizeof(dir_name) - 1;
+            }
+            memcpy(dir_name, sub, comp_len);
+            dir_name[comp_len] = '\0';
+            if (add_dirent(&dir->entries, &dir->count, &cap, 3, DT_DIR, dir_name) != 0) {
+               free(dir->entries);
+               free(dir);
+               errno = ENOMEM;
+               return NULL;
+            }
+         }
+      }
+   }
+
+   return dir;
+}
+
+struct rfs_dirent *rfs_readdir(rfs_dir_t *dirp) {
+   if (!dirp || !g_files || !g_table) {
+      errno = EBADF;
+      return NULL;
+   }
+   if (dirp->current_idx >= dirp->count) {
+      return NULL;
+   }
+   dirp->current = dirp->entries[dirp->current_idx++];
+   return &dirp->current;
+}
+
+int rfs_closedir(rfs_dir_t *dirp) {
+   if (!dirp) {
+      errno = EBADF;
+      return -1;
+   }
+   free(dirp->entries);
+   free(dirp);
+   return 0;
+}
+
+void rfs_rewinddir(rfs_dir_t *dirp) {
+   if (dirp) {
+      dirp->current_idx = 0;
+   }
+}
+
+long rfs_telldir(rfs_dir_t *dirp) {
+   if (!dirp) {
+      errno = EBADF;
+      return -1;
+   }
+   return (long)dirp->current_idx;
+}
+
+void rfs_seekdir(rfs_dir_t *dirp, long loc) {
+   if (dirp && loc >= 0) {
+      dirp->current_idx = (size_t)loc > dirp->count ? dirp->count : (size_t)loc;
+   }
+}
+
+static unsigned g_tmpfile_counter = 0;
+
+FILE *rfs_tmpfile(void) {
+   char tmp_name[64];
+   snprintf(tmp_name, sizeof(tmp_name), ".ramfs_tmp_%u_%u", (unsigned)time(NULL), ++g_tmpfile_counter);
+   FILE *fp = rfs_fopen(tmp_name, "w+b");
+   if (fp) {
+      rfs_handle_t h = file_ptr_to_handle(fp);
+      ram_file_access_t *acc = get_access(h);
+      if (acc) {
+         acc->is_tmpfile = 1;
+      }
+   }
+   return fp;
+}
+
+ssize_t rfs_getdelim(char **lineptr, size_t *n, int delimiter, FILE *stream) {
+   if (!lineptr || !n || !stream) {
+      errno = EINVAL;
+      return -1;
+   }
+   rfs_handle_t handle = file_ptr_to_handle(stream);
+   if (handle == RFS_INVALID_HANDLE) {
+      errno = EBADF;
+      return -1;
+   }
+   ram_file_access_t *acc = get_access(handle);
+   if (!acc || (acc->flags & O_ACCMODE) == O_WRONLY) {
+      if (acc) {
+         acc->error = 1;
+         errno = EBADF;
+      }
+      return -1;
+   }
+   ram_file_t *file = acc->file;
+   off_t cur_off = acc->shared_offset->offset;
+   if (cur_off >= (off_t)file->size) {
+      acc->eof = 1;
+      return -1;
+   }
+
+   if (*lineptr == NULL || *n == 0) {
+      *n = 128;
+      *lineptr = malloc(*n);
+      if (!*lineptr) {
+         acc->error = 1;
+         errno = ENOMEM;
+         return -1;
+      }
+   }
+
+   size_t read_bytes = 0;
+   while (cur_off < (off_t)file->size) {
+      int c = file->data[cur_off++];
+      if (read_bytes + 2 > *n) {
+         size_t new_n = *n * 2;
+         char *new_ptr = realloc(*lineptr, new_n);
+         if (!new_ptr) {
+            acc->error = 1;
+            errno = ENOMEM;
+            return -1;
+         }
+         *lineptr = new_ptr;
+         *n = new_n;
+      }
+      (*lineptr)[read_bytes++] = (char)c;
+      if (c == delimiter) {
+         break;
+      }
+   }
+   acc->shared_offset->offset = cur_off;
+   if (cur_off >= (off_t)file->size && read_bytes == 0) {
+      acc->eof = 1;
+      return -1;
+   }
+   (*lineptr)[read_bytes] = '\0';
+   return (ssize_t)read_bytes;
+}
+
+ssize_t rfs_getline(char **lineptr, size_t *n, FILE *stream) { return rfs_getdelim(lineptr, n, '\n', stream); }
 
 static void utils_mkdir_p(const char *dir_path) {
    char tmp[PATH_MAX];
