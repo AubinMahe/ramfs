@@ -73,7 +73,10 @@ FILE *rfs_fopen(const char *pathname, const char *mode) {
 }
 
 size_t rfs_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
-   if (size == 0 || nmemb == 0) {
+   if (!stream || size == 0 || nmemb == 0) {
+      if (!stream) {
+         errno = EBADF;
+      }
       return 0;
    }
    rfs_handle_t handle = file_ptr_to_handle(stream);
@@ -93,7 +96,10 @@ size_t rfs_fread(void *ptr, size_t size, size_t nmemb, FILE *stream) {
 }
 
 size_t rfs_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
-   if (size == 0 || nmemb == 0) {
+   if (!stream || size == 0 || nmemb == 0) {
+      if (!stream) {
+         errno = EBADF;
+      }
       return 0;
    }
    rfs_handle_t handle = file_ptr_to_handle(stream);
@@ -113,6 +119,10 @@ size_t rfs_fwrite(const void *ptr, size_t size, size_t nmemb, FILE *stream) {
 }
 
 int rfs_fseek(FILE *stream, long offset, int whence) {
+   if (!stream) {
+      errno = EBADF;
+      return -1;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       if (g_mount_len > 0) {
@@ -134,6 +144,10 @@ int rfs_fseek(FILE *stream, long offset, int whence) {
 }
 
 long rfs_ftell(FILE *stream) {
+   if (!stream) {
+      errno = EBADF;
+      return -1;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       if (g_mount_len > 0) {
@@ -148,6 +162,9 @@ long rfs_ftell(FILE *stream) {
 }
 
 void rfs_rewind(FILE *stream) {
+   if (!stream) {
+      return;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       if (g_mount_len > 0) {
@@ -196,6 +213,9 @@ int rfs_fflush(FILE *stream) {
 }
 
 int rfs_feof(FILE *stream) {
+   if (!stream) {
+      return 0;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       if (g_mount_len > 0) {
@@ -209,6 +229,9 @@ int rfs_feof(FILE *stream) {
 }
 
 int rfs_ferror(FILE *stream) {
+   if (!stream) {
+      return 0;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       if (g_mount_len > 0) {
@@ -222,6 +245,9 @@ int rfs_ferror(FILE *stream) {
 }
 
 void rfs_clearerr(FILE *stream) {
+   if (!stream) {
+      return;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       if (g_mount_len > 0) {
@@ -260,7 +286,10 @@ int rfs_fileno(FILE *stream) {
 }
 
 int rfs_ungetc(int c, FILE *stream) {
-   if (c == EOF) {
+   if (c == EOF || !stream) {
+      if (!stream) {
+         errno = EBADF;
+      }
       return EOF;
    }
    rfs_handle_t handle = file_ptr_to_handle(stream);
@@ -290,6 +319,10 @@ int rfs_ungetc(int c, FILE *stream) {
 }
 
 int rfs_fgetc(FILE *stream) {
+   if (!stream) {
+      errno = EBADF;
+      return EOF;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       if (g_mount_len > 0) {
@@ -317,8 +350,8 @@ int rfs_fgetc(FILE *stream) {
 }
 
 char *rfs_fgets(char *s, int size, FILE *stream) {
-   if (!s || size <= 0) {
-      errno = EINVAL;
+   if (!s || size <= 0 || !stream) {
+      errno = !stream ? EBADF : EINVAL;
       return NULL;
    }
    rfs_handle_t handle = file_ptr_to_handle(stream);
@@ -356,6 +389,10 @@ char *rfs_fgets(char *s, int size, FILE *stream) {
 }
 
 int rfs_fputc(int c, FILE *stream) {
+   if (!stream) {
+      errno = EBADF;
+      return EOF;
+   }
    rfs_handle_t handle = file_ptr_to_handle(stream);
    if (handle == RFS_INVALID_HANDLE) {
       if (g_mount_len > 0) {
@@ -378,8 +415,8 @@ int rfs_fputc(int c, FILE *stream) {
 }
 
 int rfs_fputs(const char *s, FILE *stream) {
-   if (!s) {
-      errno = EINVAL;
+   if (!s || !stream) {
+      errno = !stream ? EBADF : EINVAL;
       return EOF;
    }
    rfs_handle_t handle = file_ptr_to_handle(stream);

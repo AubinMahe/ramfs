@@ -1318,6 +1318,328 @@ static void test_hybrid_vfs(void) {
    rfs_destroy();
 }
 
+static void test_coverage_boost(void) {
+   char orig_proc_cwd[PATH_MAX];
+   CHECK(getcwd(orig_proc_cwd, sizeof(orig_proc_cwd)) != NULL);
+
+   /* --- 1. Tests hors-initialisation --- */
+   rfs_destroy();
+   char buf[PATH_MAX];
+   CHECK(rfs_chdir("test") == -1 && errno == ENODEV);
+   CHECK(rfs_getcwd(buf, sizeof(buf)) == NULL && errno == ENODEV);
+   CHECK(rfs_save_archive("test.tar.gz", NULL, 0) == -1 && errno == ENODEV);
+   CHECK(rfs_save_dir("test_dir", NULL, 0) == -1 && errno == ENODEV);
+   CHECK(rfs_tmpfile() == NULL && errno == ENODEV);
+   rfs_dump_stats(stderr);
+
+   /* --- 2. Initialisation par défaut et variable d'environnement --- */
+   putenv((char *)"RAMFS_MOUNT_PREFIX=/env_mnt");
+   CHECK(rfs_init(0, 0) == 0);
+   CHECK(rfs_get_mount() != NULL && strcmp(rfs_get_mount(), "/env_mnt") == 0);
+   rfs_destroy();
+   putenv((char *)"RAMFS_MOUNT_PREFIX=");
+
+   /* --- 3. Déconnexion automatique des handles dupliqués lors du rfs_destroy --- */
+   CHECK(rfs_init(10, 5) == 0);
+   rfs_handle_t fd_base = rfs_open("leak_test.txt", O_CREAT | O_RDWR, 0644);
+   CHECK(fd_base >= 0);
+   rfs_handle_t fd_dup1 = rfs_dup(fd_base);
+   CHECK(fd_dup1 >= 0);
+   rfs_handle_t fd_dup2 = rfs_dup(fd_base);
+   CHECK(fd_dup2 >= 0);
+   rfs_destroy(); /* libère shared_offset avec ref_count multiple */
+
+   /* --- 4. VFS, chdir et getcwd détaillés --- */
+   CHECK(rfs_init(64, 16) == 0);
+   /* Arguments invalides */
+   CHECK(rfs_mount(NULL) == 0);
+   CHECK(rfs_get_mount() == NULL);
+   CHECK(rfs_mount("") == 0);
+   CHECK(rfs_get_mount() == NULL);
+   CHECK(rfs_mount("mnt_trailing/") == 0);
+   CHECK(rfs_get_mount() != NULL && strcmp(rfs_get_mount(), "mnt_trailing") == 0);
+   rfs_unmount();
+
+   CHECK(rfs_mount("/virtual_mnt") == 0);
+   CHECK(rfs_chdir(NULL) == -1 && errno == EINVAL);
+   CHECK(rfs_mkdir("/virtual_mnt/docs") == 0);
+   CHECK(rfs_chdir("/virtual_mnt/docs") == 0);
+   char *cwd_dyn = rfs_getcwd(NULL, 0);
+   CHECK(cwd_dyn != NULL && strcmp(cwd_dyn, "/virtual_mnt/docs") == 0);
+   free(cwd_dyn);
+   char *cwd_dyn2 = rfs_getcwd(NULL, 256);
+   CHECK(cwd_dyn2 != NULL && strcmp(cwd_dyn2, "/virtual_mnt/docs") == 0);
+   free(cwd_dyn2);
+   char tiny_buf[4];
+   CHECK(rfs_getcwd(tiny_buf, sizeof(tiny_buf)) == NULL && errno == ERANGE);
+   CHECK(rfs_getcwd(tiny_buf, 0) == NULL && errno == EINVAL);
+
+   /* chdir relatif sous montage */
+   CHECK(rfs_mkdir("/virtual_mnt/docs/sub") == 0);
+   CHECK(rfs_chdir("sub") == 0);
+   cwd_dyn = rfs_getcwd(NULL, 0);
+   CHECK(cwd_dyn != NULL && strcmp(cwd_dyn, "/virtual_mnt/docs/sub") == 0);
+   free(cwd_dyn);
+
+   /* chdir sur le point de montage lui-même */
+   CHECK(rfs_chdir("/virtual_mnt") == 0);
+   cwd_dyn = rfs_getcwd(NULL, 0);
+   CHECK(cwd_dyn != NULL && strcmp(cwd_dyn, "/virtual_mnt") == 0);
+   free(cwd_dyn);
+
+   /* chdir vers le disque réel sous montage actif */
+   CHECK(rfs_chdir("/tmp") == 0);
+   CHECK(rfs_chdir(orig_proc_cwd) == 0);
+
+   /* retour et démontage */
+   rfs_unmount();
+   CHECK(rfs_chdir("/") == 0);
+
+   /* --- 5. Couverture POSIX : rename d'arbre, erreurs stat/open/dir --- */
+   /* Arguments invalides POSIX */
+   struct stat st_root;
+   CHECK(rfs_close(-1) == -1 && errno == EBADF);
+   CHECK(rfs_lseek(-1, 0, SEEK_SET) == -1 && errno == EBADF);
+   CHECK(rfs_fstat(-1, &st_root) == -1 && errno == EBADF);
+   CHECK(rfs_ftruncate(-1, 0) == -1 && errno == EBADF);
+   CHECK(rfs_truncate(NULL, 0) == -1 && errno == EINVAL);
+   CHECK(rfs_truncate("nonexistent_xyz", 0) == -1 && errno == ENOENT);
+   CHECK(rfs_dup(-1) == -1 && errno == EBADF);
+   CHECK(rfs_dup2(-1, 0) == -1 && errno == EBADF);
+   CHECK(rfs_rmdir(NULL) == -1 && errno == EINVAL);
+   CHECK(rfs_rmdir("nonexistent_xyz") == -1 && errno == ENOENT);
+   CHECK(rfs_mkdir(NULL) == -1 && errno == EINVAL);
+   CHECK(rfs_access(NULL, F_OK) == -1 && errno == EINVAL);
+   CHECK(rfs_stat(NULL, &st_root) == -1 && errno == EINVAL);
+   CHECK(rfs_rename(NULL, "new") == -1 && errno == EINVAL);
+   CHECK(rfs_rename("old", NULL) == -1 && errno == EINVAL);
+   CHECK(rfs_rename("nonexistent_old", "new") == -1 && errno == ENOENT);
+
+   /* rename d'une arborescence contenant des sous-dossiers et fichiers (rename_directory_children) */
+   CHECK(rfs_mkdir("tree") == 0);
+   CHECK(rfs_mkdir("tree/a") == 0);
+   CHECK(rfs_mkdir("tree/a/b") == 0);
+   rfs_handle_t tree_fd = rfs_open("tree/a/b/leaf.txt", O_CREAT | O_WRONLY, 0644);
+   CHECK(tree_fd >= 0);
+   CHECK(rfs_write(tree_fd, "leaf_content", 12) == 12);
+   CHECK(rfs_close(tree_fd) == 0);
+
+   /* rename identique même nom */
+   CHECK(rfs_rename("tree/a/b/leaf.txt", "tree/a/b/leaf.txt") == 0);
+
+   CHECK(rfs_rename("tree", "tree_renamed") == 0);
+   CHECK(rfs_access("tree_renamed/a/b/leaf.txt", F_OK) == 0);
+   CHECK(rfs_access("tree/a/b/leaf.txt", F_OK) == -1 && errno == ENOENT);
+
+   /* rename fichier sur dossier et vice versa */
+   CHECK(rfs_rename("tree_renamed/a/b/leaf.txt", "tree_renamed/a") == -1 && (errno == EISDIR || errno == ENOTDIR));
+   CHECK(rfs_rename("tree_renamed/a", "tree_renamed/a/b/leaf.txt") == -1 && (errno == EISDIR || errno == ENOTDIR));
+
+   /* open sur répertoire avec O_RDWR -> EISDIR */
+   CHECK(rfs_open("tree_renamed/a", O_RDWR, 0) == RFS_INVALID_HANDLE && errno == EISDIR);
+   CHECK(rfs_open(NULL, O_RDONLY, 0) == RFS_INVALID_HANDLE && errno == EINVAL);
+
+   /* lecture sur descripteur en écriture seule / écriture sur lecture seule */
+   rfs_handle_t ro_fd = rfs_open("tree_renamed/a/b/leaf.txt", O_RDONLY, 0);
+   CHECK(ro_fd >= 0);
+   CHECK(rfs_write(ro_fd, "fail", 4) == -1 && errno == EBADF);
+   CHECK(rfs_close(ro_fd) == 0);
+
+   rfs_handle_t wo_fd = rfs_open("tree_renamed/a/b/leaf.txt", O_WRONLY, 0);
+   CHECK(wo_fd >= 0);
+   char dummy[10];
+   CHECK(rfs_read(wo_fd, dummy, sizeof(dummy)) == -1 && errno == EBADF);
+   CHECK(rfs_close(wo_fd) == 0);
+
+   /* remove sur fichier et dossier */
+   CHECK(rfs_remove(NULL) == -1 && errno == EINVAL);
+   CHECK(rfs_remove("tree_renamed/a/b/leaf.txt") == 0);
+   CHECK(rfs_remove("tree_renamed/a/b") == 0);
+   CHECK(rfs_remove("tree_renamed/a") == 0);
+   CHECK(rfs_remove("tree_renamed") == 0);
+
+   /* stat sur / et . */
+   CHECK(rfs_stat("/", &st_root) == 0 && S_ISDIR(st_root.st_mode));
+   CHECK(rfs_stat(".", &st_root) == 0);
+
+   /* opendir erreurs et inspection d'un dossier hôte réel */
+   CHECK(rfs_opendir(NULL) == NULL && errno == EINVAL);
+   CHECK(rfs_closedir(NULL) == -1 && errno == EBADF);
+   CHECK(rfs_readdir(NULL) == NULL && errno == EBADF);
+   CHECK(rfs_telldir(NULL) == -1 && errno == EBADF);
+   rfs_seekdir(NULL, 0);
+   rfs_rewinddir(NULL);
+
+   /* dossier hôte réel */
+   rfs_dir_t *host_d = rfs_opendir(".");
+   CHECK(host_d != NULL);
+   struct rfs_dirent *host_ent = rfs_readdir(host_d);
+   CHECK(host_ent != NULL);
+   long host_pos = rfs_telldir(host_d);
+   CHECK(host_pos >= 0);
+   rfs_seekdir(host_d, host_pos);
+   rfs_rewinddir(host_d);
+   CHECK(rfs_closedir(host_d) == 0);
+
+   /* opendir sur fichier régulier */
+   rfs_handle_t reg_fd = rfs_open("reg_file.txt", O_CREAT | O_WRONLY, 0644);
+   CHECK(reg_fd >= 0 && rfs_close(reg_fd) == 0);
+   CHECK(rfs_opendir("reg_file.txt") == NULL && errno == ENOTDIR);
+   CHECK(rfs_opendir("nonexistent_xyz") == NULL && errno == ENOENT);
+   CHECK(rfs_unlink("reg_file.txt") == 0);
+
+   /* --- 6. Couverture STDIO : flux hôte sous point de montage, fflush(NULL), ungetc --- */
+   CHECK(rfs_mount("/vfs_stdio") == 0);
+   /* flux hôte avec mount_prefix actif */
+   FILE *real_f = fopen("test_coverage_host.txt", "w+b");
+   CHECK(real_f != NULL);
+   if (real_f) {
+      CHECK(rfs_fwrite("hello", 1, 5, real_f) == 5);
+      CHECK(rfs_fseek(real_f, 0, SEEK_SET) == 0);
+      CHECK(rfs_ftell(real_f) == 0);
+      CHECK(rfs_fgetc(real_f) == 'h');
+      CHECK(rfs_ungetc('h', real_f) == 'h');
+      char host_buf[10];
+      CHECK(rfs_fread(host_buf, 1, 5, real_f) == 5);
+      CHECK(rfs_feof(real_f) == 0);
+      CHECK(rfs_ferror(real_f) == 0);
+      rfs_clearerr(real_f);
+      CHECK(rfs_fputc('!', real_f) == '!');
+      CHECK(rfs_fclose(real_f) == 0);
+      unlink("test_coverage_host.txt");
+   }
+
+   /* fflush(NULL) */
+   CHECK(rfs_fflush(NULL) == 0);
+
+   /* Opérations STDIO sur stream NULL */
+   char host_buf[10];
+   CHECK(rfs_feof(NULL) == 0);
+   CHECK(rfs_ferror(NULL) == 0);
+   rfs_clearerr(NULL);
+   rfs_rewind(NULL);
+   CHECK(rfs_fseek(NULL, 0, SEEK_SET) == -1);
+   CHECK(rfs_ftell(NULL) == -1);
+   CHECK(rfs_fread(host_buf, 1, 5, NULL) == 0);
+   CHECK(rfs_fwrite(host_buf, 1, 5, NULL) == 0);
+   CHECK(rfs_fgetc(NULL) == EOF);
+   CHECK(rfs_fputc('a', NULL) == EOF);
+   CHECK(rfs_fgets(host_buf, sizeof(host_buf), NULL) == NULL);
+   CHECK(rfs_fputs("test", NULL) == EOF);
+   CHECK(rfs_fprintf(NULL, "test") == -1);
+   CHECK(rfs_fclose(NULL) == EOF);
+
+   /* ungetc et opérations invalides sur ramfs FILE* */
+   FILE *rf_w = rfs_fopen("/vfs_stdio/stream_err.txt", "w");
+   CHECK(rf_w != NULL);
+   CHECK(rfs_fgetc(rf_w) == EOF);
+   CHECK(rfs_ungetc('a', rf_w) == EOF);
+   CHECK(rfs_fclose(rf_w) == 0);
+
+   FILE *rf_r = rfs_fopen("/vfs_stdio/stream_err.txt", "r");
+   CHECK(rf_r != NULL);
+   CHECK(rfs_fputc('z', rf_r) == EOF);
+   CHECK(rfs_ungetc(EOF, rf_r) == EOF);
+   CHECK(rfs_fclose(rf_r) == 0);
+   CHECK(rfs_unlink("/vfs_stdio/stream_err.txt") == 0);
+
+   /* getline arguments invalides et flux hôte */
+   char *gline = NULL;
+   size_t gn = 0;
+   CHECK(rfs_getline(NULL, &gn, stdin) == -1 && errno == EINVAL);
+   CHECK(rfs_getline(&gline, NULL, stdin) == -1 && errno == EINVAL);
+   CHECK(rfs_getline(&gline, &gn, NULL) == -1 && errno == EINVAL);
+
+   FILE *host_gl = fopen("test_gl_host.txt", "w");
+   CHECK(host_gl != NULL);
+   if (host_gl) {
+      fprintf(host_gl, "line1\n");
+      fclose(host_gl);
+      host_gl = fopen("test_gl_host.txt", "r");
+      CHECK(host_gl != NULL);
+      if (host_gl) {
+         ssize_t gl_read = rfs_getline(&gline, &gn, host_gl);
+         CHECK(gl_read > 0);
+         free(gline);
+         gline = NULL;
+         gn = 0;
+         fclose(host_gl);
+      }
+      unlink("test_gl_host.txt");
+   }
+
+   /* --- 7. Couverture Archive : filtrage de chemins, dossiers, USTAR long name --- */
+   rfs_unmount();
+   rfs_destroy();
+   CHECK(rfs_init(64, 16) == 0);
+
+   /* Sauvegarde/chargement arguments invalides ou inexistants */
+   CHECK(rfs_save_archive(NULL, NULL, 0) == -1 && errno == EINVAL);
+   CHECK(rfs_load("nonexistent_arch_file.tar.gz", NULL, NULL) == -1 && errno == ENOENT);
+   CHECK(rfs_load(NULL, "nonexistent_disk_dir_xyz", NULL) == -1 && errno == ENOENT);
+
+   /* Création de fichiers et dossiers dont un à long chemin (> 100 caractères pour USTAR prefix) */
+   CHECK(rfs_mkdir("arch_dir") == 0);
+   CHECK(rfs_mkdir("arch_dir/sub") == 0);
+   rfs_handle_t af1 = rfs_open("arch_dir/sub/f1.txt", O_CREAT | O_WRONLY, 0644);
+   CHECK(af1 >= 0 && rfs_write(af1, "data1", 5) == 5 && rfs_close(af1) == 0);
+
+   rfs_handle_t af2 = rfs_open("arch_dir/sub/f2.txt", O_CREAT | O_WRONLY, 0644);
+   CHECK(af2 >= 0 && rfs_write(af2, "data2", 5) == 5 && rfs_close(af2) == 0);
+
+   /* Nom très long : > 100 caractères */
+   const char *long_ustar =
+       "this_is_a_very_long_directory_name_to_exercise_the_tar_ustar_prefix_formatting_exceeding_one_hundred_characters/nested.txt";
+   rfs_handle_t aflong = rfs_open(long_ustar, O_CREAT | O_WRONLY, 0644);
+   CHECK(aflong >= 0 && rfs_write(aflong, "long_ustar_data", 15) == 15 && rfs_close(aflong) == 0);
+
+   /* Sauvegarde partielle avec liste de chemins explicite */
+   rfs_handle_t afr = rfs_open("root_solo.txt", O_CREAT | O_WRONLY, 0644);
+   CHECK(afr >= 0 && rfs_write(afr, "solo", 4) == 4 && rfs_close(afr) == 0);
+
+   const char *filter_paths[] = {"arch_dir", "arch_dir/sub/f1.txt", "root_solo.txt", long_ustar};
+   CHECK(rfs_save_archive("build_linux/partial.tar.gz", filter_paths, 4) == 0);
+   CHECK(rfs_save_dir("build_linux/partial_dir", filter_paths, 4) == 0);
+
+   /* Sauvegarde partielle avec count == 0 (terminé par NULL) */
+   const char *null_term_paths[] = {"root_solo.txt", NULL};
+   CHECK(rfs_save_archive("build_linux/partial2.tar.gz", null_term_paths, 0) == 0);
+   unlink("build_linux/partial2.tar.gz");
+
+   /* Chargement avec préfixe avec et sans slash terminal */
+   CHECK(rfs_load("build_linux/partial.tar.gz", NULL, "loaded_tar/") > 0);
+   CHECK(rfs_access("loaded_tar/arch_dir/sub/f1.txt", F_OK) == 0);
+   CHECK(rfs_access("loaded_tar/root_solo.txt", F_OK) == 0);
+   CHECK(rfs_access("loaded_tar/arch_dir/sub/f2.txt", F_OK) == -1); /* non exporté */
+
+   CHECK(rfs_load(NULL, "build_linux/partial_dir", "loaded_disk/") > 0);
+   CHECK(rfs_access("loaded_disk/arch_dir/sub/f1.txt", F_OK) == 0);
+   CHECK(rfs_access("loaded_disk/root_solo.txt", F_OK) == 0);
+
+   /* Nettoyage archive */
+   unlink("build_linux/partial.tar.gz");
+   unlink("build_linux/partial_dir/arch_dir/sub/f1.txt");
+   unlink("build_linux/partial_dir/root_solo.txt");
+   RMDIR("build_linux/partial_dir/arch_dir/sub");
+   RMDIR("build_linux/partial_dir/arch_dir");
+   unlink("build_linux/partial_dir/"
+          "this_is_a_very_long_directory_name_to_exercise_the_tar_ustar_prefix_formatting_exceeding_one_hundred_characters/"
+          "nested.txt");
+   RMDIR("build_linux/partial_dir/"
+         "this_is_a_very_long_directory_name_to_exercise_the_tar_ustar_prefix_formatting_exceeding_one_hundred_characters");
+   RMDIR("build_linux/partial_dir");
+
+   /* --- 8. Normalisation de chemins cas limites --- */
+   char norm_out[PATH_MAX];
+   CHECK(rfs_normalize_path("", norm_out, sizeof(norm_out)) == 0 && norm_out[0] == '\0');
+   CHECK(rfs_normalize_path("../file.txt", norm_out, sizeof(norm_out)) == 0);
+   CHECK(strcmp(norm_out, "../file.txt") == 0);
+   CHECK(rfs_normalize_path("dir/../../file.txt", norm_out, sizeof(norm_out)) == 0);
+   CHECK(strcmp(norm_out, "../file.txt") == 0);
+
+   rfs_destroy();
+}
+
 int main(void) {
    RUN(test_not_initialized);
    RUN(test_open_errors);
@@ -1341,6 +1663,7 @@ int main(void) {
    RUN(test_dirent_and_cwd);
    RUN(test_tmpfile_and_getline);
    RUN(test_hybrid_vfs);
+   RUN(test_coverage_boost);
    {
       int before = g_failures;
       CHECK(test_macros() == 0);

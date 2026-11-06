@@ -175,6 +175,6 @@ coverage: $(B_COV)/test_ramfs
 	@echo "=== Synthèse de la couverture de test (lcov) ==="
 	@lcov --summary $(B_COV)/coverage_src.info --rc branch_coverage=1
 	@echo ""
-	@echo "Rapport HTML détaillé disponible : $(B_COV)/html/index.html"
+	@xdg-open "$(B_COV)/html/index.html"
 
 -include $(wildcard $(addsuffix /*.d,$(ALL_DIRS)))
