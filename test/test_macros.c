@@ -1,7 +1,6 @@
-/* Vérifie que, avec USE_RAMFS, le code "à l'ancienne" (open/read/write/fopen...)
- * est redirigé vers ramfs et ne touche pas au disque.
- * Les en-têtes système doivent être inclus AVANT ramfs.h : les macros
- * remplacent open/read/write/close/... et casseraient leurs prototypes. */
+/* Verifies that, when USE_RAMFS is defined, standard I/O calls
+ * are redirected to ramfs and do not hit physical disk.
+ * System headers must be included before ramfs.h. */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -56,7 +55,7 @@ static int g_fail;
    do {                                                                                                                            \
       if (!(cond)) {                                                                                                               \
          g_fail++;                                                                                                                 \
-         fprintf(stderr, "ÉCHEC %s:%d : %s\n", __FILE__, __LINE__, #cond);                                                         \
+         fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                                                           \
       }                                                                                                                            \
    } while (0)
 
@@ -66,7 +65,7 @@ int test_macros(void) {
    g_fail = 0;
    rfs_init(4, 4);
 
-   /* API de bas niveau */
+   /* Low-level POSIX API */
    int fd = open(FILENAME, O_CREAT | O_RDWR | O_TRUNC, 0644);
    EXPECT(fd != RFS_INVALID_HANDLE);
    EXPECT(write(fd, "hello", 5) == 5);
@@ -75,13 +74,13 @@ int test_macros(void) {
    EXPECT(read(fd, buf, sizeof(buf) - 1) == 5);
    EXPECT(strcmp(buf, "hello") == 0);
 
-   /* fstat et stat redirigés vers ramfs */
+   /* fstat and stat redirected to ramfs */
    EXPECT(fstat(fd, &st) == 0);
    EXPECT(st.st_size == 5);
    EXPECT(close(fd) == 0);
    EXPECT(stat(FILENAME, &st) == 0);
    EXPECT(st.st_size == 5);
-   EXPECT(!disk_file_exists(FILENAME)); /* aucun fichier réel créé sur disque */
+   EXPECT(!disk_file_exists(FILENAME));
 
    EXPECT(unlink(FILENAME) == 0);
    errno = 0;
@@ -89,7 +88,7 @@ int test_macros(void) {
    errno = 0;
    EXPECT(open(FILENAME, O_RDONLY) == RFS_INVALID_HANDLE && errno == ENOENT);
 
-   /* API stdio */
+   /* stdio API */
    FILE *f = fopen(FILENAME, "w");
    EXPECT(f != NULL);
    EXPECT(fprintf(f, "PORT=%d TIMEOUT=%.1f MODE=%s\n", 8080, 45.5, "PRODUCTION") > 0);
@@ -136,7 +135,7 @@ int test_macros(void) {
    errno = 0;
    EXPECT(fopen(FILENAME, "r") == NULL && errno == ENOENT);
 
-   /* Macros Flex & Bison / Indexation : fileno, isatty, ungetc, access, rename */
+   /* fileno, isatty, ungetc, access, rename */
    FILE *flex_f = fopen("lexer_input.sql", "w+");
    EXPECT(flex_f != NULL);
    int flex_fd = fileno(flex_f);
@@ -172,7 +171,7 @@ int test_macros(void) {
    EXPECT(!disk_file_exists("vfprintf_test.txt"));
    EXPECT(remove("vfprintf_test.txt") == 0);
 
-   /* mkdir et rmdir */
+   /* mkdir and rmdir */
    EXPECT(mkdir("macro_dir", 0755) == 0);
    EXPECT(!disk_file_exists("macro_dir"));
    EXPECT(access("macro_dir", F_OK) == 0);
@@ -223,7 +222,7 @@ int test_macros(void) {
    EXPECT(unlink("dir_macro/f.txt") == 0);
    EXPECT(rmdir("dir_macro") == 0);
 
-   /* tmpfile et getline via macros */
+   /* tmpfile and getline via macros */
    FILE *t_m = tmpfile();
    EXPECT(t_m != NULL);
    EXPECT(fprintf(t_m, "macro line 1\nmacro line 2\n") > 0);
@@ -237,7 +236,7 @@ int test_macros(void) {
    free(l_m);
    EXPECT(fclose(t_m) == 0);
 
-   /* Mode VFS Hybride via macros */
+   /* Hybrid VFS mode via macros */
    EXPECT(rfs_mount("/ramfs") == 0);
    unlink("build_linux/macro_real.txt");
    int real_m = open("build_linux/macro_real.txt", O_CREAT | O_RDWR | O_TRUNC, 0644);

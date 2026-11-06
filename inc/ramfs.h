@@ -21,69 +21,68 @@ typedef int rfs_handle_t;
 #define RFS_INVALID_HANDLE (-1)
 
 typedef struct {
-   unsigned files_used;      /* Nombre actuel de fichiers en mémoire */
-   unsigned peak_files;      /* Pic maximal de fichiers simultanés */
-   unsigned files_capacity;  /* Capacité configurée lors de rfs_init */
-   unsigned access_used;     /* Nombre actuel de descripteurs ouverts */
-   unsigned peak_access;     /* Pic maximal de descripteurs simultanés */
-   unsigned access_capacity; /* Capacité configurée lors de rfs_init */
+   unsigned files_used;      /* Current number of active files */
+   unsigned peak_files;      /* Peak concurrent files */
+   unsigned files_capacity;  /* Capacity configured or allocated */
+   unsigned access_used;     /* Current number of open descriptors */
+   unsigned peak_access;     /* Peak concurrent descriptors */
+   unsigned access_capacity; /* Capacity configured or allocated */
 } rfs_stats_t;
 
 /**
- * Initialise les structures de données de ramfs à partir des limites fournies.
+ * Initializes ramfs internal structures.
+ * Pass (0, 0) for automatic auto-extending default sizing.
  *
- * @param file_count nombre maximal de fichiers
- * @param access_count nombre maximal de descripteur de fichier (open, fopen)
- * @return 0 en cas de succès, -1 en cas d'erreur (errno positionné).
+ * @param file_count Initial file capacity (or 0 for default).
+ * @param access_count Initial open descriptor capacity (or 0 for default).
+ * @return 0 on success, -1 on failure (errno set).
  */
 RAMFS_API int rfs_init(unsigned file_count, unsigned access_count);
 
 /**
- * Libère les ressources, réinitialise les descripteurs statiques.
+ * Releases all allocated resources and resets global state.
  */
 RAMFS_API void rfs_destroy(void);
 
 /**
- * Configure un point de montage virtuel pour le mode VFS Hybride.
- * Tout chemin débutant par ce préfixe est traité en RAM par ramfs.
- * Tout chemin en dehors de ce préfixe est relayé de façon transparente vers le système de fichiers réel (libc).
+ * Configures a virtual mount prefix for Hybrid VFS mode.
+ * Paths starting with this prefix are managed in RAM by ramfs.
+ * All other paths pass through transparently to the host OS filesystem (libc).
  *
- * Si prefix est NULL ou "", le filtrage est désactivé et tous les chemins sont gérés en RAM.
+ * If prefix is NULL or "", hybrid filtering is disabled and all paths are managed in RAM.
  *
- * @param prefix chemin du point de montage (ex: "/ramfs", "ramfs", "./tmp/ram")
- * @return 0 en cas de succès, -1 en cas d'erreur.
+ * @param prefix Virtual mount prefix (e.g. "/ramfs", "ramfs").
+ * @return 0 on success, -1 on failure.
  */
 RAMFS_API int rfs_mount(const char *prefix);
 
 /**
- * Retourne le point de montage virtuel actuel, ou NULL si non configuré.
+ * Returns the current virtual mount prefix, or NULL if unset.
  */
 RAMFS_API const char *rfs_get_mount(void);
 
 /**
- * Démonte le point de montage virtuel (désactive le filtrage hybride).
+ * Unmounts the virtual mount prefix (disables hybrid filtering).
  */
 RAMFS_API void rfs_unmount(void);
 
 /**
- * Retourne la version de la bibliothèque fixée par le tag git le plus récent.
- *
- * @return chaîne de caractères constante contenant le numéro de version (ex: "v1.0.0").
+ * Returns the library version string (e.g. "v2.0.0").
  */
 RAMFS_API const char *rfs_version(void);
 
 /**
- * Récupère les métriques d'utilisation et de crête de la bibliothèque.
+ * Retrieves current and peak usage statistics.
  *
- * @param stats pointeur vers la structure recevant les métriques
- * @return 0 en cas de succès, -1 si non initialisé (errno = ENODEV) ou stats NULL (errno = EINVAL).
+ * @param stats Pointer to destination statistics structure.
+ * @return 0 on success, -1 on failure (errno set).
  */
 RAMFS_API int rfs_get_stats(rfs_stats_t *stats);
 
 /**
- * Affiche un rapport synthétique des jauges et pics d'utilisation.
+ * Dumps a human-readable summary of usage statistics.
  *
- * @param stream flux cible (si NULL, affiche sur stderr).
+ * @param stream Destination stream (defaults to stderr if NULL).
  */
 RAMFS_API void rfs_dump_stats(FILE *stream);
 
@@ -160,42 +159,41 @@ RAMFS_API ssize_t rfs_getdelim(char **lineptr, size_t *n, int delimiter, FILE *s
 RAMFS_API ssize_t rfs_getline(char **lineptr, size_t *n, FILE *stream);
 
 /**
- * Sauvegarde une sélection ou la totalité des fichiers en mémoire vers une archive compressée (.tar.gz).
+ * Saves selected or all in-memory files to a compressed archive (.tar.gz).
  *
- * @param archive_path chemin de l'archive .tar.gz à créer (ne doit pas être NULL).
- * @param paths tableau optionnel de chemins à sauvegarder (si NULL, tous les fichiers sont archivés).
- * @param path_count nombre d'éléments dans paths (si 0 et paths != NULL, le tableau est considéré terminé par NULL).
- * @return 0 en cas de succès, -1 en cas d'erreur (errno positionné).
+ * @param archive_path Path of the .tar.gz archive to create (must not be NULL).
+ * @param paths Optional array of paths to save (if NULL, all files are archived).
+ * @param path_count Number of elements in paths (if 0 and paths != NULL, array is NULL-terminated).
+ * @return 0 on success, -1 on failure (errno set).
  */
 RAMFS_API int rfs_save_archive(const char *archive_path, const char *const *paths, size_t path_count);
 
 /**
- * Sauvegarde une sélection ou la totalité des fichiers en mémoire en recréant l'arborescence sur le disque.
+ * Saves selected or all in-memory files by reconstructing the directory tree on physical disk.
  *
- * @param dest_dir répertoire racine de destination sur disque (si NULL, dossier courant ".").
- * @param paths tableau optionnel de chemins à sauvegarder (si NULL, tous les fichiers sont exportés).
- * @param path_count nombre d'éléments dans paths (si 0 et paths != NULL, le tableau est considéré terminé par NULL).
- * @return 0 en cas de succès, -1 en cas d'erreur (errno positionné).
+ * @param dest_dir Destination root directory on disk (if NULL, defaults to ".").
+ * @param paths Optional array of paths to save (if NULL, all files are exported).
+ * @param path_count Number of elements in paths (if 0 and paths != NULL, array is NULL-terminated).
+ * @return 0 on success, -1 on failure (errno set).
  */
 RAMFS_API int rfs_save_dir(const char *dest_dir, const char *const *paths, size_t path_count);
 
 /**
- * Charge et peuple la mémoire de ramfs depuis une archive (.tar.gz) ou le disque.
+ * Loads and populates ramfs from a compressed archive (.tar.gz) or physical disk directory.
  *
- * @param archive_path si non NULL, chemin de l'archive compressée .tar.gz à charger en mémoire.
- * @param src_dir si archive_path == NULL, répertoire racine source sur disque à charger (si NULL, relatif au PWD).
- * @param prefix préfixe optionnel à ajouter aux chemins extraits en mémoire (NULL pour conserver l'arborescence telle quelle).
- * @return le nombre de fichiers chargés en mémoire en cas de succès (>= 0), ou -1 en cas d'erreur (errno positionné).
+ * @param archive_path If non-NULL, path of the .tar.gz archive to load into memory.
+ * @param src_dir If archive_path == NULL, source directory on disk to load.
+ * @param prefix Optional prefix to prepend to extracted in-memory paths (NULL preserves hierarchy).
+ * @return Number of files loaded on success (>= 0), or -1 on failure (errno set).
  */
 RAMFS_API int rfs_load(const char *archive_path, const char *src_dir, const char *prefix);
 
 /**
- * Peuple la mémoire de ramfs en lisant récursivement un dossier sur disque.
- * Chaque fichier est lu et recréé fidèlement en RAM.
+ * Populates ramfs by recursively reading a directory from disk.
  *
- * @param dir_path chemin du répertoire racine sur disque à charger (si NULL, dossier courant ".").
- * @param prefix préfixe optionnel sous lequel enregistrer les fichiers en mémoire (NULL pour conserver l'arborescence relative).
- * @return le nombre de fichiers chargés en mémoire en cas de succès (>= 0), ou -1 en cas d'erreur (errno positionné).
+ * @param dir_path Path of root directory on disk to load (if NULL, defaults to ".").
+ * @param prefix Optional prefix under which to store files in memory.
+ * @return Number of files loaded on success (>= 0), or -1 on failure (errno set).
  */
 RAMFS_API int rfs_load_dir(const char *dir_path, const char *prefix);
 

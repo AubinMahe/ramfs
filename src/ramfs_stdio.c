@@ -13,7 +13,7 @@
 #define STDIO_HANDLE_BIAS ((uintptr_t)0xBA5E0000)
 
 /* =========================================================================
- * Variables et fonctions de conversion - privées au module stdio
+ * Stream conversion helpers (private to stdio module)
  * ========================================================================= */
 
 static unsigned g_tmpfile_counter = 0;
@@ -37,7 +37,7 @@ static inline rfs_handle_t file_ptr_to_handle(FILE *stream) {
 }
 
 /* =========================================================================
- * Fonctions de cycle de vie et flux (FILE*)
+ * Standard C stdio stream operations (FILE*)
  * ========================================================================= */
 
 FILE *rfs_fopen(const char *pathname, const char *mode) {

@@ -18,7 +18,7 @@ typedef intptr_t ssize_t;
 #endif
 
 /* =========================================================================
- * Structures internes de navigation de répertoires - privées au module POSIX
+ * Internal directory navigation structures (private to POSIX module)
  * ========================================================================= */
 
 struct rfs_dir {
@@ -30,7 +30,7 @@ struct rfs_dir {
 };
 
 /* =========================================================================
- * Opérations sur les descripteurs de fichiers (POSIX fd)
+ * File descriptor operations (POSIX fd)
  * ========================================================================= */
 
 static rfs_handle_t allocate_access_slot(const ram_file_t *file, int access_mode) {
@@ -1059,7 +1059,7 @@ int rfs_truncate(const char *pathname, off_t length) {
 }
 
 /* =========================================================================
- * Opérations sur les répertoires (dirent POSIX)
+ * Directory operations (POSIX dirent)
  * ========================================================================= */
 
 static int add_dirent(struct rfs_dirent **entries, size_t *count, size_t *cap, ino_t ino, unsigned char type, const char *name) {

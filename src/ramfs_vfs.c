@@ -14,18 +14,18 @@
 #endif
 
 /* =========================================================================
- * Variables globales du VFS
+ * VFS global state variables
  * ========================================================================= */
 
-/* Répertoire de travail virtuel */
+/* Virtual current working directory */
 char g_cwd[PATH_MAX] = "/";
 
-/* Point de montage virtuel (Mode VFS Hybride) */
+/* Virtual mount prefix (Hybrid VFS mode) */
 char g_mount_prefix[PATH_MAX] = "";
 size_t g_mount_len = 0;
 
 /* =========================================================================
- * Gestion du point de montage (rfs_mount / rfs_unmount)
+ * Mount point management (rfs_mount / rfs_unmount)
  * ========================================================================= */
 
 void rfs_unmount(void) {

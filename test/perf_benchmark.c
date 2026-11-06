@@ -50,13 +50,13 @@ typedef struct {
 } bench_metrics_t;
 
 /* =========================================================================
- * Exécution du banc de test : mode disque (0) ou mode ramfs (1)
+ * Benchmark workload execution: physical disk (0) or ramfs (1)
  * ========================================================================= */
 static int run_benchmark_workload(int is_ram, bench_metrics_t *m) {
    char path[PATH_MAX];
    double t0;
 
-   /* 1. Création et écriture séquentielle */
+   /* 1. Sequential creation and write */
    t0 = now_sec();
    for (int i = 0; i < NUM_FILES; i++) {
       if (is_ram) {
@@ -85,7 +85,7 @@ static int run_benchmark_workload(int is_ram, bench_metrics_t *m) {
    }
    m->t_create_write = now_sec() - t0;
 
-   /* 2. Relecture avec vérification de contenu (2 passes complètes) */
+   /* 2. Content read and verification (2 full passes) */
    t0 = now_sec();
    for (int pass = 0; pass < 2; pass++) {
       for (int i = 0; i < NUM_FILES; i++) {
@@ -116,7 +116,7 @@ static int run_benchmark_workload(int is_ram, bench_metrics_t *m) {
    }
    m->t_read_verify = now_sec() - t0;
 
-   /* 3. Mises à jour in-place avec seek (2 500 fichiers modifiés) */
+   /* 3. In-place seek and update (2,500 modified files) */
    t0 = now_sec();
    char update_token[] = "MODIFIED_IN_PLACE_BLOCK";
    for (int i = 0; i < NUM_FILES / 2; i++) {
@@ -148,7 +148,7 @@ static int run_benchmark_workload(int is_ram, bench_metrics_t *m) {
    }
    m->t_update_seek = now_sec() - t0;
 
-   /* 4. Sondage d'état (stat) */
+   /* 4. Metadata stat query */
    t0 = now_sec();
    struct stat st;
    for (int i = 0; i < NUM_FILES; i++) {
@@ -166,7 +166,7 @@ static int run_benchmark_workload(int is_ram, bench_metrics_t *m) {
    }
    m->t_stat = now_sec() - t0;
 
-   /* 5. Suppression de fichiers (unlink) */
+   /* 5. File deletion (unlink) */
    t0 = now_sec();
    for (int i = 0; i < NUM_FILES; i++) {
       if (is_ram) {
@@ -188,54 +188,54 @@ static int run_benchmark_workload(int is_ram, bench_metrics_t *m) {
 }
 
 int main(void) {
-   /* Initialisation du motif mémoire */
+   /* Memory pattern initialization */
    memset(g_payload, 'K', sizeof(g_payload) - 1);
    g_payload[sizeof(g_payload) - 1] = '\0';
 
    printf("================================================================================\n");
-   printf("       BANC COMPARATIF DISQUE vs RAMFS (%d fichiers de %d octets)\n", NUM_FILES, FILE_SIZE);
-   printf("       Version ramfs testée : %s\n", rfs_version());
+   printf("       BENCHMARK: PHYSICAL DISK vs RAMFS (%d files of %d bytes)\n", NUM_FILES, FILE_SIZE);
+   printf("       ramfs version: %s\n", rfs_version());
    printf("================================================================================\n\n");
 
    /* -------------------------------------------------------------------------
-    * Phase 1 : Exécution sur DISQUE PHYSIQUE
+    * Phase 1: Physical disk execution
     * ------------------------------------------------------------------------- */
    MKDIR("build_linux");
    MKDIR(DISK_DIR);
    bench_metrics_t m_disk = {0};
-   printf("[1/2] Exécution des opérations sur DISQUE PHYSIQUE (%s) ...\n", DISK_DIR);
+   printf("[1/2] Running benchmark on PHYSICAL DISK (%s) ...\n", DISK_DIR);
    if (run_benchmark_workload(0, &m_disk) != 0) {
-      fprintf(stderr, "Erreur lors de l'exécution sur disque\n");
+      fprintf(stderr, "Error during disk benchmark\n");
       RMDIR(DISK_DIR);
       return 1;
    }
    RMDIR(DISK_DIR);
-   printf("      Terminé en %.4f secondes.\n\n", m_disk.t_total);
+   printf("      Completed in %.4f seconds.\n\n", m_disk.t_total);
 
    /* -------------------------------------------------------------------------
-    * Phase 2 : Exécution sur RAMFS
+    * Phase 2: In-memory ramfs execution
     * ------------------------------------------------------------------------- */
    bench_metrics_t m_ram = {0};
-   printf("[2/2] Exécution des mêmes opérations sur RAMFS ...\n");
+   printf("[2/2] Running identical workload on RAMFS ...\n");
    if (rfs_init(NUM_FILES + 1024, 16) != 0) {
-      fprintf(stderr, "Erreur rfs_init\n");
+      fprintf(stderr, "Error in rfs_init\n");
       return 1;
    }
    if (run_benchmark_workload(1, &m_ram) != 0) {
-      fprintf(stderr, "Erreur lors de l'exécution sur ramfs\n");
+      fprintf(stderr, "Error during ramfs benchmark\n");
       rfs_destroy();
       return 1;
    }
    rfs_destroy();
-   printf("      Terminé en %.4f secondes.\n\n", m_ram.t_total);
+   printf("      Completed in %.4f seconds.\n\n", m_ram.t_total);
 
    /* -------------------------------------------------------------------------
-    * Rapport comparatif détaillé & Calcul du ratio d'accélération
+    * Detailed comparative report & Speedup factor calculation
     * ------------------------------------------------------------------------- */
    printf("================================================================================\n");
-   printf("                      RÉSULTATS DÉTAILLÉS PAR OPÉRATION                         \n");
+   printf("                      DETAILED RESULTS BY OPERATION                             \n");
    printf("================================================================================\n");
-   printf("%-30s | %-12s | %-12s | %-10s\n", "Phase", "Disque (s)", "ramfs (s)", "Facteur");
+   printf("%-32s | %-12s | %-12s | %-10s\n", "Operation", "Disk (s)", "ramfs (s)", "Speedup");
    printf("--------------------------------------------------------------------------------\n");
 
    double r_write = (m_ram.t_create_write > 0) ? (m_disk.t_create_write / m_ram.t_create_write) : 0;
@@ -245,21 +245,22 @@ int main(void) {
    double r_unl = (m_ram.t_unlink > 0) ? (m_disk.t_unlink / m_ram.t_unlink) : 0;
    double r_total = (m_ram.t_total > 0) ? (m_disk.t_total / m_ram.t_total) : 0;
 
-   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Création & écriture (5000)", m_disk.t_create_write, m_ram.t_create_write,
+   printf("%-32s | %10.4f s | %10.4f s | %8.1fx\n", "Sequential create & write (5000)", m_disk.t_create_write, m_ram.t_create_write,
           r_write);
-   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Relecture x2 (10000)", m_disk.t_read_verify, m_ram.t_read_verify, r_read);
-   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Mises à jour in-place (2500)", m_disk.t_update_seek, m_ram.t_update_seek,
+   printf("%-32s | %10.4f s | %10.4f s | %8.1fx\n", "Double read verify (10000)", m_disk.t_read_verify, m_ram.t_read_verify,
+          r_read);
+   printf("%-32s | %10.4f s | %10.4f s | %8.1fx\n", "In-place seek & update (2500)", m_disk.t_update_seek, m_ram.t_update_seek,
           r_upd);
-   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Sondage stat (5000)", m_disk.t_stat, m_ram.t_stat, r_stat);
-   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "Suppression unlink (5000)", m_disk.t_unlink, m_ram.t_unlink, r_unl);
+   printf("%-32s | %10.4f s | %10.4f s | %8.1fx\n", "Metadata stat query (5000)", m_disk.t_stat, m_ram.t_stat, r_stat);
+   printf("%-32s | %10.4f s | %10.4f s | %8.1fx\n", "File deletion unlink (5000)", m_disk.t_unlink, m_ram.t_unlink, r_unl);
    printf("================================================================================\n");
-   printf("%-30s | %10.4f s | %10.4f s | %8.1fx\n", "TOTAL GÉNÉRAL", m_disk.t_total, m_ram.t_total, r_total);
+   printf("%-32s | %10.4f s | %10.4f s | %8.1fx\n", "TOTAL WORKLOAD", m_disk.t_total, m_ram.t_total, r_total);
    printf("================================================================================\n\n");
 
    if (r_total >= 30.0) {
-      printf(">>> RÉSULTAT CONFORME : Facteur d'accélération de %.1fx (>= objectif de 30x) <<<\n\n", r_total);
+      printf(">>> TARGET MET: Speedup factor of %.1fx (>= 30x goal) <<<\n\n", r_total);
    } else {
-      printf(">>> AVERTISSEMENT : Facteur d'accélération de %.1fx (< objectif de 30x) <<<\n\n", r_total);
+      printf(">>> WARNING: Speedup factor of %.1fx (< 30x goal) <<<\n\n", r_total);
    }
 
    return 0;

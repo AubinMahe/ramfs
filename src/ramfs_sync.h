@@ -68,8 +68,4 @@ static inline rfs_rwlock_t *rfs_rwlock_create(void) { return NULL; }
 
 static inline void rfs_rwlock_free(rfs_rwlock_t *rw) { (void)rw; }
 
-static inline rfs_rwlock_t *rfs_rwlock_create(void) { return NULL; }
-
-static inline void rfs_rwlock_free(rfs_rwlock_t *rw) { (void)rw; }
-
 #endif

@@ -18,7 +18,7 @@
 #endif
 
 /* =========================================================================
- * En-tête du format tar (POSIX ustar) - privé au module d'archivage
+ * Tar format header (POSIX ustar) - private to archive module
  * ========================================================================= */
 
 struct tar_header {
@@ -42,7 +42,7 @@ struct tar_header {
 };
 
 /* =========================================================================
- * Utilitaires d'archivage et de répertoires disques
+ * Physical disk directory utilities
  * ========================================================================= */
 
 static void disk_mkdir_p(const char *dir_path) {
@@ -205,7 +205,7 @@ static int write_file_to_disk(FILE *f, const ram_file_t *file) {
 }
 
 /* =========================================================================
- * Exportation d'archives tar.gz et dossiers
+ * Tar archive and directory export
  * ========================================================================= */
 
 int rfs_save_archive(const char *archive_path, const char *const *paths, size_t path_count) {
@@ -346,7 +346,7 @@ int rfs_save_dir(const char *dest_dir, const char *const *paths, size_t path_cou
 }
 
 /* =========================================================================
- * Importation d'archives tar.gz et dossiers
+ * Tar archive and directory import
  * ========================================================================= */
 
 static void build_ram_target_path(char *dst, size_t dst_size, const char *prefix, const char *sub_rel) {

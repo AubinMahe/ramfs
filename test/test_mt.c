@@ -31,12 +31,12 @@ typedef struct {
    int thread_id;
 } worker_arg_t;
 
-/* Initialisation des fichiers partagés */
+/* Shared files initialization */
 static void setup_shared_files(void) {
    char path[64];
    char data[128];
    for (int i = 0; i < NUM_SHARED_FILES; i++) {
-      /* Fichiers en lecture seule partagée */
+      /* Shared read-only files */
       snprintf(path, sizeof(path), "shared_ro/data_%d.dat", i);
       snprintf(data, sizeof(data), "SHARED_DATA_CONTENT_PATTERN_%04d", i);
       rfs_handle_t fd = rfs_open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -47,7 +47,7 @@ static void setup_shared_files(void) {
          MT_CHECK(rfs_close(fd) == 0);
       }
 
-      /* Fichiers en écriture/lecture atomique partagée */
+      /* Shared atomic read/write files */
       snprintf(path, sizeof(path), "shared_rw/data_%d.dat", i);
       char block[BLOCK_SIZE];
       memset(block, 'Z', sizeof(block));
@@ -61,7 +61,7 @@ static void setup_shared_files(void) {
    }
 }
 
-/* Groupe 1 (threads 0-3) : créations privées, lectures et suppressions */
+/* Group 1 (threads 0-3): private creates, reads and deletions */
 static void worker_create_delete(int tid) {
    char path[64];
    char wbuf[64];
@@ -91,7 +91,7 @@ static void worker_create_delete(int tid) {
    }
 }
 
-/* Groupe 2 (threads 4-7) : lectures concurrentes partagées */
+/* Group 2 (threads 4-7): concurrent shared readers */
 static void worker_shared_read(int tid) {
    (void)tid;
    char path[64];
@@ -114,7 +114,7 @@ static void worker_shared_read(int tid) {
    }
 }
 
-/* Groupe 3 (threads 8-11) : modifications et lectures concurrentes avec vérification d'atomicité */
+/* Group 3 (threads 8-11): concurrent atomic updates and reads */
 static void worker_shared_update(int tid) {
    char path[64];
    char wblock[BLOCK_SIZE];
@@ -126,7 +126,7 @@ static void worker_shared_update(int tid) {
       int idx = i % NUM_SHARED_FILES;
       snprintf(path, sizeof(path), "shared_rw/data_%d.dat", idx);
 
-      /* Écriture atomique sous wrlock (attente non-bloquante si un autre thread détient l'accès) */
+      /* Atomic write under wrlock (yield if busy) */
       rfs_handle_t fd = RFS_INVALID_HANDLE;
       while ((fd = rfs_open(path, O_WRONLY)) < 0) {
          if (errno == EBUSY) {
@@ -142,7 +142,7 @@ static void worker_shared_update(int tid) {
          MT_CHECK(rfs_close(fd) == 0);
       }
 
-      /* Lecture atomique sous rdlock : pas de déchirure de données (torn read) */
+      /* Atomic read under rdlock (verifies no torn reads) */
       fd = RFS_INVALID_HANDLE;
       while ((fd = rfs_open(path, O_RDONLY)) < 0) {
          if (errno == EBUSY) {
@@ -169,7 +169,7 @@ static void worker_shared_update(int tid) {
    }
 }
 
-/* Groupe 4 (threads 12-15) : inspection stat & opendir concurrente */
+/* Group 4 (threads 12-15): concurrent stat & opendir inspection */
 static void worker_inspect_dir(int tid) {
    (void)tid;
    struct stat st;
@@ -188,7 +188,7 @@ static void worker_inspect_dir(int tid) {
          while ((ent = rfs_readdir(d)) != NULL) {
             count++;
          }
-         MT_CHECK(count >= 2); /* au moins . et .. */
+         MT_CHECK(count >= 2); /* At least . and .. */
          MT_CHECK(rfs_closedir(d) == 0);
       }
    }
@@ -210,7 +210,7 @@ static void *worker_func(void *arg) {
 }
 
 int main(void) {
-   printf("=== Démarrage du test de concurrence multi-thread (16 threads, %d ops/thread) ===\n", OPS_PER_WORKER);
+   printf("=== Multi-threaded stress test (%d workers, %d ops/thread) ===\n", NUM_WORKERS, OPS_PER_WORKER);
    MT_CHECK(rfs_init(0, 0) == 0);
 
    setup_shared_files();
@@ -228,7 +228,8 @@ int main(void) {
       pthread_join(threads[i], NULL);
    }
 
-   printf("=== Fin du test de concurrence : %s (Échecs = %d) ===\n", g_mt_failures == 0 ? "SUCCÈS" : "ÉCHEC", g_mt_failures);
+   printf("=== Multi-threaded stress test finished: %s (Failures = %d) ===\n", g_mt_failures == 0 ? "SUCCESS" : "FAILURE",
+          g_mt_failures);
    rfs_destroy();
    return g_mt_failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }

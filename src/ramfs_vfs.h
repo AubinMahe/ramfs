@@ -7,7 +7,7 @@
 #define RFS_FD_BASE 0x40000000
 
 /* =========================================================================
- * Variables globales du VFS
+ * VFS global state variables
  * ========================================================================= */
 
 extern char g_cwd[PATH_MAX];
@@ -16,7 +16,7 @@ extern size_t g_mount_len;
 extern unsigned g_access_capacity;
 
 /* =========================================================================
- * Inlines de conversion et de filtrage
+ * Descriptor conversion and filtering inlines
  * ========================================================================= */
 
 static inline const char *skip_slashes(const char *p) {
@@ -48,7 +48,7 @@ static inline rfs_handle_t slot_to_fd(unsigned slot) {
 }
 
 /* =========================================================================
- * Fonctions de routage de point de montage
+ * Mount point routing functions
  * ========================================================================= */
 
 int is_under_mount(const char *clean_path, char *ram_rel, size_t rel_size);

@@ -17,35 +17,35 @@
 #endif
 
 /* =========================================================================
- * Variables globales du noyau (Core)
+ * Core global state variables
  * ========================================================================= */
 
-/* Pool de fichiers + pile des indices libres */
+/* File pool and free index stack */
 ram_file_t *g_files = NULL;
 unsigned *g_free_stack = NULL;
 unsigned g_free_top = 0;
 unsigned g_files_capacity = 0;
 
-/* Table de hachage : adressage ouvert, sondage linéaire, taille = puissance de 2,
-   suppression par décalage arrière (pas de tombstones). */
+/* Open-addressing hash table with linear probing; load factor <= 0.5;
+   backward-shift deletion without tombstones. */
 ram_catalog_t *g_table = NULL;
 size_t g_table_mask = 0;
 
-/* Table des descripteurs d'accès ouverts */
+/* Open file access table */
 ram_file_access_t *g_access_table = NULL;
 unsigned g_access_capacity = 0;
 
-/* Statistiques et jauges de crête */
+/* Statistics and peak usage counters */
 unsigned g_files_used = 0;
 unsigned g_peak_files = 0;
 unsigned g_access_used = 0;
 unsigned g_peak_access = 0;
 
-/* Suivi de la profondeur d'arborescence (nombre maximal de '/') pour accélérer is_dir_prefix */
+/* Path depth tracking (slash counts) to accelerate is_dir_prefix */
 static unsigned g_max_depth = 0;
 static unsigned g_depth_counts[64];
 
-/* Pool et Slabs de blocs mémoires fixes (Chunked & Slab Storage) */
+/* Fixed-size chunk pool and slabs */
 static unsigned char **g_chunk_pool = NULL;
 static size_t g_chunk_pool_top = 0;
 static size_t g_chunk_pool_capacity = 0;
@@ -373,7 +373,7 @@ int is_dir_prefix(const char *clean_path) {
    return 0;
 }
 
-/* Retire l'entrée à l'index i en conservant la validité des chaînes de sondage. */
+/* Removes entry at index i while maintaining probe chain integrity */
 void remove_from_catalog(size_t i) {
    if (g_table[i].path != NULL) {
       catalog_depth_remove(g_table[i].path);
@@ -386,8 +386,8 @@ void remove_from_catalog(size_t i) {
       if (g_table[j].path == NULL) {
          break;
       }
-      size_t k = g_table[j].hash & g_table_mask; /* position idéale de j */
-      /* j peut être déplacé en i si k n'est pas cycliquement dans ]i, j] */
+      size_t k = g_table[j].hash & g_table_mask; /* Ideal slot for j */
+      /* j can be moved to i if k is not cyclically in ]i, j] */
       int movable = (i <= j) ? (k <= i || k > j) : (k <= i && k > j);
       if (movable) {
          g_table[i] = g_table[j];
@@ -397,7 +397,7 @@ void remove_from_catalog(size_t i) {
    memset(g_table + i, 0, sizeof(ram_catalog_t));
 }
 
-/* Renvoie l'accès pour un handle valide et ouvert, sinon NULL (errno = EBADF). */
+/* Returns access descriptor for a valid handle, or NULL with errno = EBADF */
 ram_file_access_t *get_access(rfs_handle_t fd) {
    if ((g_files == NULL) || (g_access_table == NULL)) {
       errno = ENODEV;
@@ -465,7 +465,7 @@ static int append_path_component(char *dst, size_t *dst_idx, size_t root_idx, co
 static inline int is_path_separator(char c) { return c == '/' || c == '\\'; }
 
 static int parse_root_prefix(const char *src, size_t *src_idx, char *dst, size_t *dst_idx) {
-   /* Lettre de lecteur Windows éventuelle (ex: "C:" ou "c:\") */
+   /* Windows drive letter (e.g. "C:" or "c:\") */
    if (isalpha((unsigned char)src[0]) && src[1] == ':') {
       dst[(*dst_idx)++] = (char)toupper((unsigned char)src[0]);
       dst[(*dst_idx)++] = ':';
@@ -511,12 +511,12 @@ int rfs_normalize_path(const char *src, char *dst, size_t dst_size) {
       }
       size_t comp_len = (size_t)(src + src_idx - comp_start);
 
-      /* Composant "." ignoré */
+      /* Ignore "." */
       if (comp_len == 1 && comp_start[0] == '.') {
          continue;
       }
 
-      /* Composant ".." */
+      /* Handle ".." */
       if (comp_len == 2 && comp_start[0] == '.' && comp_start[1] == '.') {
          if (handle_dotdot_component(dst, &dst_idx, root_idx, is_absolute, dst_size) != 0) {
             return -1;
@@ -524,7 +524,7 @@ int rfs_normalize_path(const char *src, char *dst, size_t dst_size) {
          continue;
       }
 
-      /* Composant normal */
+      /* Regular component */
       if (append_path_component(dst, &dst_idx, root_idx, comp_start, comp_len, dst_size) != 0) {
          return -1;
       }
@@ -867,7 +867,7 @@ int rfs_init(unsigned files_count, unsigned access_count) {
    }
    size_t table_size = MIN_TABLE_SIZE;
    while (table_size < (size_t)files_count * 2) {
-      table_size *= 2; /* facteur de charge <= 0,5 */
+      table_size *= 2; /* Load factor <= 0.5 */
    }
    g_files = calloc(files_count, sizeof(ram_file_t));
    g_free_stack = malloc(files_count * sizeof(unsigned));
@@ -894,7 +894,7 @@ int rfs_init(unsigned files_count, unsigned access_count) {
    } else {
       rfs_unmount();
    }
-   /* indices poussés en ordre décroissant : le 0 sort en premier */
+   /* Push indices in reverse order so 0 is popped first */
    for (unsigned i = 0; i < files_count; i++) {
       g_free_stack[i] = files_count - 1 - i;
       rfs_file_lock_init(&g_files[i]);
@@ -903,7 +903,7 @@ int rfs_init(unsigned files_count, unsigned access_count) {
    RFS_RWLOCK_INIT(&g_catalog_rwlock);
    RFS_MUTEX_INIT(&g_access_mutex);
    RFS_MUTEX_INIT(&g_slab_mutex);
-   /* Préchauffage du pool (Axe 4) : 1 slab de 16 blocs de 64 Ko (1 Mo) */
+   /* Pre-heat pool: 1 slab of 16 chunks (1 MB) */
    allocate_slab();
    return 0;
 }
@@ -1004,13 +1004,13 @@ void rfs_dump_stats(FILE *stream) {
    FILE *out = stream ? stream : stderr;
    rfs_stats_t st;
    if (rfs_get_stats(&st) != 0) {
-      fprintf(out, "ramfile: non initialisé (version %s)\n", rfs_version());
+      fprintf(out, "ramfs: not initialized (version %s)\n", rfs_version());
       return;
    }
    double files_pct = st.files_capacity ? ((double)st.peak_files * 100.0 / (double)st.files_capacity) : 0.0;
    double access_pct = st.access_capacity ? ((double)st.peak_access * 100.0 / (double)st.access_capacity) : 0.0;
-   fprintf(out, "=== Statistiques ramfs (%s) ===\n", rfs_version());
-   fprintf(out, "Fichiers : actuel %u, pic %u / %u (%.1f%%)\n", st.files_used, st.peak_files, st.files_capacity, files_pct);
-   fprintf(out, "Accès    : actuel %u, pic %u / %u (%.1f%%)\n", st.access_used, st.peak_access, st.access_capacity, access_pct);
+   fprintf(out, "=== ramfs statistics (%s) ===\n", rfs_version());
+   fprintf(out, "Files  : current %u, peak %u / %u (%.1f%%)\n", st.files_used, st.peak_files, st.files_capacity, files_pct);
+   fprintf(out, "Access : current %u, peak %u / %u (%.1f%%)\n", st.access_used, st.peak_access, st.access_capacity, access_pct);
    fprintf(out, "============================\n");
 }

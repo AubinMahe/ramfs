@@ -10,7 +10,7 @@ else ifeq ($(MODE),RELEASE)
 	BUILD_FLAGS := -g0 -O2 -DNDEBUG
 	SUFFIX      :=
 else
-  $(error MODE doit valoir RELEASE ou DEBUG)
+  $(error MODE must be RELEASE or DEBUG)
 endif
 SRC_LIB     := src/ramfs_core.c src/ramfs_vfs.c src/ramfs_posix.c src/ramfs_stdio.c src/ramfs_archive.c
 HDR         := inc/ramfs.h src/ramfs_core.h src/ramfs_vfs.h src/ramfs_sync.h
@@ -150,44 +150,44 @@ COMPLEXITY_LIMIT ?= 25
 metrics: complexity
 
 complexity:
-	@which pmccabe >/dev/null 2>&1 || (echo "Erreur: pmccabe n'est pas installé (sudo apt install pmccabe)" && exit 1)
-	@echo "=== Fonctions les plus complexes (CCN >= $(COMPLEXITY_LIMIT)) ==="
-	@printf "%-5s %-5s %-7s %-6s %s\n" "CCN" "Trad" "Stmts" "Lines" "Fonction"
+	@which pmccabe >/dev/null 2>&1 || (echo "Error: pmccabe is not installed (sudo apt install pmccabe)" && exit 1)
+	@echo "=== Most complex functions (CCN >= $(COMPLEXITY_LIMIT)) ==="
+	@printf "%-5s %-5s %-7s %-6s %s\n" "CCN" "Trad" "Stmts" "Lines" "Function"
 	@echo "----------------------------------------------------------------------"
 	@pmccabe -c -r $(COMPLEXITY_LIMIT) $(SRC_LIB) | sort -k1,1nr | awk -F'\t' '{ printf "%-5s %-5s %-7s %-6s %s\n", $$1, $$2, $$3, $$5, $$6 }'
 	@echo "----------------------------------------------------------------------"
-	@echo "=== Synthèse par module ==="
-	@printf "%-6s %-7s %-6s %s\n" "CCN" "Stmts" "Lines" "Fichier"
+	@echo "=== Summary by module ==="
+	@printf "%-6s %-7s %-6s %s\n" "CCN" "Stmts" "Lines" "File"
 	@echo "----------------------------------------------------------------------"
 	@pmccabe -c -F $(SRC_LIB) | awk -F'\t' '{ printf "%-6s %-7s %-6s %s\n", $$1, $$3, $$5, $$6 }'
 	@echo "----------------------------------------------------------------------"
-	@printf "TOTAL PROJET : "
-	@pmccabe -c -T $(SRC_LIB) | awk -F'\t' '{ printf "CCN=%s, Instructions=%s, Lignes de code=%s\n", $$1, $$3, $$5 }'
+	@printf "TOTAL PROJECT : "
+	@pmccabe -c -T $(SRC_LIB) | awk -F'\t' '{ printf "CCN=%s, Stmts=%s, LoC=%s\n", $$1, $$3, $$5 }'
 
 $(B_COV)/test_ramfs: $(SRC_LIB) $(TESTS) $(HDR)
 	@mkdir -p $(@D)
 	$(CC_LINUX) $(QA_CFLAGS) -g -O0 --coverage -o $@ $(SRC_LIB) $(TESTS) $(QA_LDLIBS)
 
 gcov: $(B_COV)/test_ramfs
-	@which gcov >/dev/null 2>&1 || (echo "Erreur: gcov n'est pas installé" && exit 1)
+	@which gcov >/dev/null 2>&1 || (echo "Error: gcov is not installed" && exit 1)
 	@rm -f $(B_COV)/*.gcda
 	@./$< >/dev/null
-	@echo "=== Couverture de code par module (gcov) ==="
+	@echo "=== Code coverage by module (gcov) ==="
 	@cd $(B_COV) && gcov -n $(patsubst src/%.c,test_ramfs-%.gcda,$(SRC_LIB))
 
 lcov: coverage
 
 coverage: $(B_COV)/test_ramfs
-	@which lcov >/dev/null 2>&1 || (echo "Erreur: lcov n'est pas installé (sudo apt install lcov)" && exit 1)
-	@which genhtml >/dev/null 2>&1 || (echo "Erreur: genhtml n'est pas installé (sudo apt install lcov)" && exit 1)
+	@which lcov >/dev/null 2>&1 || (echo "Error: lcov is not installed (sudo apt install lcov)" && exit 1)
+	@which genhtml >/dev/null 2>&1 || (echo "Error: genhtml is not installed (sudo apt install lcov)" && exit 1)
 	@rm -f $(B_COV)/*.gcda $(B_COV)/*.info
 	@rm -rf $(B_COV)/html
 	@./$< >/dev/null
 	@lcov --capture --directory $(B_COV) --output-file $(B_COV)/coverage.info --rc branch_coverage=1 --ignore-errors gcov,gcov >/dev/null 2>&1
 	@lcov --extract $(B_COV)/coverage.info "*/src/*" --output-file $(B_COV)/coverage_src.info --rc branch_coverage=1 --ignore-errors gcov,gcov >/dev/null 2>&1
-	@genhtml $(B_COV)/coverage_src.info --output-directory $(B_COV)/html --title "Couverture de test ramfs" --branch-coverage
+	@genhtml $(B_COV)/coverage_src.info --output-directory $(B_COV)/html --title "ramfs test coverage" --branch-coverage
 	@echo ""
-	@echo "=== Synthèse de la couverture de test (lcov) ==="
+	@echo "=== Code coverage summary (lcov) ==="
 	@lcov --summary $(B_COV)/coverage_src.info --rc branch_coverage=1
 	@echo ""
 	@xdg-open "$(B_COV)/html/index.html"

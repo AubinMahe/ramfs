@@ -1,6 +1,6 @@
-/* Tests unitaires et fonctionnels de ramfs.
- * N'utilise pas assert() : les vérifications restent actives avec -DNDEBUG.
- * Code de retour : 0 si tout passe, 1 sinon. */
+/* Unit and functional test suite for ramfs.
+ * Does not use assert(): checks remain active with -DNDEBUG.
+ * Exit code: 0 on success, 1 on failure. */
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -32,7 +32,7 @@
 #define R_OK 4
 #endif
 
-int test_macros(void); /* test_macros.c : test de la redirection par macros */
+int test_macros(void); /* test_macros.c: macro redirection test */
 
 static int g_checks = 0;
 static int g_failures = 0;
@@ -42,11 +42,11 @@ static int g_failures = 0;
       g_checks++;                                                                                                                  \
       if (!(cond)) {                                                                                                               \
          g_failures++;                                                                                                             \
-         fprintf(stderr, "ÉCHEC %s:%d : %s\n", __FILE__, __LINE__, #cond);                                                         \
+         fprintf(stderr, "FAIL %s:%d: %s\n", __FILE__, __LINE__, #cond);                                                           \
       }                                                                                                                            \
    } while (0)
 
-/* Vérifie la valeur de retour ET errno. */
+/* Checks return value and errno */
 #define CHECK_FAIL(call, ret, err)                                                                                                 \
    do {                                                                                                                            \
       errno = 0;                                                                                                                   \
@@ -60,10 +60,10 @@ static int g_failures = 0;
    do {                                                                                                                            \
       int before_ = g_failures;                                                                                                    \
       t();                                                                                                                         \
-      printf("%-28s %s\n", #t, g_failures == before_ ? "OK" : "ÉCHEC");                                                            \
+      printf("%-28s %s\n", #t, g_failures == before_ ? "OK" : "FAIL");                                                             \
    } while (0)
 
-/* ---------- utilitaires ---------- */
+/* ---------- Utilities ---------- */
 
 static int put(const char *name, const char *content) {
    rfs_handle_t fd = rfs_open(name, O_CREAT | O_WRONLY | O_TRUNC, 0644);
@@ -106,14 +106,14 @@ static void test_open_errors(void) {
    rfs_handle_t w = rfs_open("a", O_CREAT | O_WRONLY, 0644);
    CHECK(w >= 0);
    CHECK_FAIL(rfs_open("a", O_CREAT | O_EXCL | O_WRONLY, 0644), RFS_INVALID_HANDLE, EEXIST);
-   CHECK_FAIL(rfs_open("a", O_RDONLY), RFS_INVALID_HANDLE, EBUSY); /* écrivain actif */
+   CHECK_FAIL(rfs_open("a", O_RDONLY), RFS_INVALID_HANDLE, EBUSY); /* Active writer */
    CHECK(rfs_close(w) == 0);
 
    rfs_handle_t r1 = rfs_open("a", O_RDONLY);
    rfs_handle_t r2 = rfs_open("a", O_RDONLY);
-   CHECK(r1 >= 0 && r2 >= 0 && r1 != r2); /* lecteurs multiples autorisés */
+   CHECK(r1 >= 0 && r2 >= 0 && r1 != r2); /* Multiple concurrent readers allowed */
    CHECK_FAIL(rfs_open("a", O_WRONLY), RFS_INVALID_HANDLE, EBUSY);
-   /* Auto-extension de la table d'accès : le 3e lecteur est alloué dynamiquement */
+   /* Dynamic access table expansion */
    rfs_handle_t r3 = rfs_open("a", O_RDONLY);
    CHECK(r3 >= 0 && r3 != r1 && r3 != r2);
    CHECK(rfs_close(r1) == 0);
@@ -123,7 +123,7 @@ static void test_open_errors(void) {
    rfs_handle_t b = rfs_open("b", O_CREAT | O_WRONLY, 0644);
    CHECK(b >= 0);
    CHECK(rfs_close(b) == 0);
-   /* Auto-extension du catalogue : création au-delà de la capacité initiale */
+   /* Dynamic catalog expansion */
    rfs_handle_t c = rfs_open("c", O_CREAT | O_WRONLY, 0644);
    CHECK(c >= 0);
    CHECK(rfs_close(c) == 0);
@@ -170,16 +170,16 @@ static void test_read_write_seek(void) {
    CHECK_FAIL(rfs_lseek(fd, -1, SEEK_SET), -1, EINVAL);
    CHECK_FAIL(rfs_lseek(fd, -11, SEEK_END), -1, EINVAL);
    CHECK_FAIL(rfs_lseek(fd, 0, 99), -1, EINVAL);
-   CHECK(rfs_lseek(fd, 0, SEEK_CUR) == 10); /* offset inchangé après échec */
+   CHECK(rfs_lseek(fd, 0, SEEK_CUR) == 10); /* Offset unchanged after error */
 
-   /* réécriture au milieu */
+   /* Mid-file rewrite */
    CHECK(rfs_lseek(fd, 3, SEEK_SET) == 3);
    CHECK(rfs_write(fd, "XY", 2) == 2);
    CHECK(rfs_lseek(fd, 0, SEEK_SET) == 0);
    memset(buf, 0, sizeof(buf));
    CHECK(rfs_read(fd, buf, sizeof(buf)) == 10 && memcmp(buf, "012XY56789", 10) == 0);
 
-   /* écriture après la fin : le trou doit être rempli de zéros */
+   /* Sparse write: gap must be zero-filled */
    CHECK(rfs_lseek(fd, 20, SEEK_SET) == 20);
    CHECK(rfs_write(fd, "Z", 1) == 1);
    CHECK(rfs_lseek(fd, 0, SEEK_END) == 21);
@@ -197,7 +197,7 @@ static void test_read_write_seek(void) {
    CHECK(rfs_lseek(fd, 0, SEEK_END) == 0);
    CHECK(rfs_close(fd) == 0);
 
-   /* O_APPEND : l'écriture se fait toujours à la fin, même après lseek */
+   /* O_APPEND: write always occurs at EOF */
    CHECK(put("ap", "abc"));
    fd = rfs_open("ap", O_WRONLY | O_APPEND);
    CHECK(fd >= 0);
@@ -216,7 +216,7 @@ static void test_growth(void) {
    }
    rfs_handle_t fd = rfs_open("big", O_CREAT | O_RDWR, 0644);
    size_t done = 0;
-   while (done < sizeof(src)) { /* écritures de 777 octets : plusieurs croissances */
+   while (done < sizeof(src)) { /* 777-byte chunks triggering multiple growths */
       size_t n = sizeof(src) - done < 777 ? sizeof(src) - done : 777;
       CHECK(rfs_write(fd, src + done, n) == (ssize_t)n);
       done += n;
@@ -235,7 +235,7 @@ static void test_unlink_and_slots(void) {
       snprintf(name, sizeof(name), "f%d", i);
       CHECK(put(name, name));
    }
-   /* Auto-extension au-delà de la capacité initiale de 8 fichiers */
+   /* Dynamic expansion beyond initial capacity of 8 files */
    CHECK(put("f8", "f8"));
    CHECK(has_content("f8", "f8"));
    CHECK(rfs_unlink("f8") == 0);
@@ -269,8 +269,8 @@ static void make_name(char *out, size_t cap, int i) {
    snprintf(out, cap, "dir/file_%04d.dat", i); /* préfixe commun, comme en production */
 }
 
-/* Insertions/suppressions massives : vérifie la table de hachage (collisions,
-   décalage arrière à la suppression, restitution des emplacements libres). */
+/* Massive insertion/deletion: verifies hash table probe integrity,
+ * backward-shift deletion, and slot recycling. */
 static void test_hash_integrity(void) {
    char name[64], content[96];
    rfs_init(NB_FILES, 2);
@@ -278,7 +278,7 @@ static void test_hash_integrity(void) {
       make_name(name, sizeof(name), i);
       CHECK(put(name, name));
    }
-   /* Auto-extension au-delà de NB_FILES (2000) */
+   /* Dynamic expansion beyond NB_FILES (2000) */
    CHECK(put("debordement", "valeur_debordement"));
    CHECK(has_content("debordement", "valeur_debordement"));
    CHECK(rfs_unlink("debordement") == 0);
@@ -313,7 +313,7 @@ static void test_hash_integrity(void) {
       make_name(name, sizeof(name), i);
       CHECK_FAIL(rfs_open(name, O_RDONLY), RFS_INVALID_HANDLE, ENOENT);
    }
-   for (int i = 0; i < NB_FILES; i++) { /* tous les emplacements sont redevenus libres */
+   for (int i = 0; i < NB_FILES; i++) { /* All slots recycled and available */
       make_name(name, sizeof(name), i);
       CHECK(put(name, name));
    }
@@ -1730,7 +1730,7 @@ static void test_chunked_storage(void) {
 }
 
 static void test_dynamic_catalog(void) {
-   /* 1. Initialisation par défaut avec zéros */
+   /* 1. Default initialization with zeros */
    CHECK(rfs_init(0, 0) == 0);
    rfs_stats_t st;
    CHECK(rfs_get_stats(&st) == 0);
@@ -1739,10 +1739,10 @@ static void test_dynamic_catalog(void) {
    CHECK(st.files_used == 0);
    rfs_destroy();
 
-   /* 2. Démarrage avec de très petites capacités (2 fichiers, 2 descripteurs) */
+   /* 2. Start with minimal capacities (2 files, 2 descriptors) */
    CHECK(rfs_init(2, 2) == 0);
 
-   /* Création de 150 fichiers pour forcer de multiples extensions de catalogue */
+   /* Create 150 files to trigger multiple catalog table expansions */
    char path[64];
    char content[64];
    for (int i = 0; i < 150; i++) {
@@ -1751,19 +1751,19 @@ static void test_dynamic_catalog(void) {
       CHECK(put(path, content));
    }
 
-   /* Vérification des statistiques de croissance */
+   /* Verify growth statistics */
    CHECK(rfs_get_stats(&st) == 0);
    CHECK(st.files_used == 150);
    CHECK(st.files_capacity >= 150);
 
-   /* Vérification de l'intégrité de tous les fichiers créés */
+   /* Verify content integrity of all created files */
    for (int i = 0; i < 150; i++) {
       snprintf(path, sizeof(path), "dyn_dir/sub_%03d.txt", i);
       snprintf(content, sizeof(content), "CONTENT_OF_FILE_%03d", i);
       CHECK(has_content(path, content));
    }
 
-   /* 3. Ouverture simultanée de 30 descripteurs pour tester l'extension de la table d'accès */
+   /* 3. Open 30 descriptors concurrently to test access table expansion */
    int fds[30];
    for (int i = 0; i < 30; i++) {
       snprintf(path, sizeof(path), "dyn_dir/sub_%03d.txt", i);
@@ -1781,7 +1781,7 @@ static void test_dynamic_catalog(void) {
    CHECK(rfs_get_stats(&st) == 0);
    CHECK(st.access_used == 0);
 
-   /* 4. Duplication au-delà de la capacité */
+   /* 4. Duplication beyond capacity */
    int fd_base = rfs_open("dyn_dir/sub_000.txt", O_RDONLY);
    CHECK(fd_base >= 0);
    int dup_fds[35];
@@ -1826,8 +1826,8 @@ int main(void) {
    {
       int before = g_failures;
       CHECK(test_macros() == 0);
-      printf("%-28s %s\n", "test_macros", g_failures == before ? "OK" : "ÉCHEC");
+      printf("%-28s %s\n", "test_macros", g_failures == before ? "OK" : "FAIL");
    }
-   printf("\n%d vérifications, %d échec(s)\n", g_checks, g_failures);
+   printf("\n%d checks, %d failure(s)\n", g_checks, g_failures);
    return g_failures ? EXIT_FAILURE : EXIT_SUCCESS;
 }
