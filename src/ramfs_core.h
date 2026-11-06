@@ -7,9 +7,11 @@
 #include <stdint.h>
 #include <sys/stat.h>
 
+#define RAMFS_INLINE_CAPACITY 1024
 #define RAMFS_CHUNK_SHIFT 16
 #define RAMFS_CHUNK_SIZE (1UL << RAMFS_CHUNK_SHIFT) /* 65536 octets = 64 Ko */
 #define RAMFS_CHUNK_MASK (RAMFS_CHUNK_SIZE - 1UL)
+#define RAMFS_SLAB_CHUNKS 16 /* 16 blocs de 64 Ko = 1 Mo par tranche (Slab) */
 #define MIN_TABLE_SIZE 8
 
 /* =========================================================================
@@ -17,12 +19,14 @@
  * ========================================================================= */
 
 typedef struct {
-   unsigned char *first_chunk; /* Premier bloc direct (inlined) évitant l'allocation d'un tableau */
-   unsigned char **chunks;     /* Tableau de pointeurs alloué uniquement si chunks_count > 1 */
-   size_t chunks_count;        /* Nombre de blocs alloués */
-   size_t chunks_capacity;     /* Capacité du tableau de pointeurs chunks */
-   size_t size;                /* Taille logique du fichier en octets */
-   int is_dir;
+   unsigned char inline_data[RAMFS_INLINE_CAPACITY]; /* Données inlinées pour fichiers <= 1 Ko (SFO) */
+   unsigned char *first_chunk;                       /* Premier bloc paginé de 64 Ko */
+   unsigned char **chunks;                           /* Tableau de pointeurs alloué si chunks_count > 1 */
+   size_t chunks_count;                              /* Nombre de blocs paginés alloués */
+   size_t chunks_capacity;                           /* Capacité du tableau de pointeurs chunks */
+   size_t size;                                      /* Taille logique du fichier en octets */
+   int is_dir;                                       /* 1 si répertoire, 0 si fichier régulier */
+   int is_inlined;                                   /* 1 si contenu dans inline_data, 0 si paginé */
 } ram_file_t;
 
 /* Entrée de la table de hachage. path == NULL indique une case libre. */

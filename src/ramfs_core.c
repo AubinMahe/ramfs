@@ -45,17 +45,14 @@ unsigned g_peak_access = 0;
 static unsigned g_max_depth = 0;
 static unsigned g_depth_counts[64];
 
-/* Pool de recyclage des blocs mémoires fixes (Chunked Storage) */
+/* Pool et Slabs de blocs mémoires fixes (Chunked & Slab Storage) */
 static unsigned char **g_chunk_pool = NULL;
 static size_t g_chunk_pool_top = 0;
 static size_t g_chunk_pool_capacity = 0;
 
-static unsigned char *allocate_chunk(void) {
-   if (g_chunk_pool_top > 0) {
-      return g_chunk_pool[--g_chunk_pool_top];
-   }
-   return malloc(RAMFS_CHUNK_SIZE);
-}
+static unsigned char **g_slab_list = NULL;
+static size_t g_slab_count = 0;
+static size_t g_slab_capacity = 0;
 
 static void release_chunk(unsigned char *chunk) {
    if (!chunk) {
@@ -65,13 +62,42 @@ static void release_chunk(unsigned char *chunk) {
       size_t new_cap = g_chunk_pool_capacity ? g_chunk_pool_capacity * 2 : 64;
       unsigned char **new_pool = realloc(g_chunk_pool, new_cap * sizeof(unsigned char *));
       if (!new_pool) {
-         free(chunk);
          return;
       }
       g_chunk_pool = new_pool;
       g_chunk_pool_capacity = new_cap;
    }
    g_chunk_pool[g_chunk_pool_top++] = chunk;
+}
+
+static int allocate_slab(void) {
+   if (g_slab_count >= g_slab_capacity) {
+      size_t new_cap = g_slab_capacity ? g_slab_capacity * 2 : 16;
+      unsigned char **new_slabs = realloc(g_slab_list, new_cap * sizeof(unsigned char *));
+      if (!new_slabs) {
+         return -1;
+      }
+      g_slab_list = new_slabs;
+      g_slab_capacity = new_cap;
+   }
+   unsigned char *slab = malloc(RAMFS_SLAB_CHUNKS * RAMFS_CHUNK_SIZE);
+   if (!slab) {
+      return -1;
+   }
+   g_slab_list[g_slab_count++] = slab;
+   for (size_t i = 0; i < RAMFS_SLAB_CHUNKS; i++) {
+      release_chunk(slab + i * RAMFS_CHUNK_SIZE);
+   }
+   return 0;
+}
+
+static unsigned char *allocate_chunk(void) {
+   if (g_chunk_pool_top == 0) {
+      if (allocate_slab() != 0) {
+         return malloc(RAMFS_CHUNK_SIZE);
+      }
+   }
+   return g_chunk_pool[--g_chunk_pool_top];
 }
 
 static unsigned count_slashes(const char *s) {
@@ -159,11 +185,13 @@ ram_catalog_t *create_entry_in_catalog(const char *path, size_t hash) {
       return NULL;
    }
    ram_file_t *file = g_files + g_free_stack[--g_free_top];
+   file->first_chunk = NULL;
    file->chunks = NULL;
    file->chunks_count = 0;
    file->chunks_capacity = 0;
    file->size = 0;
    file->is_dir = 0;
+   file->is_inlined = 1;
    size_t i = hash & g_table_mask;
    while (g_table[i].path != NULL) {
       i = (i + 1) & g_table_mask;
@@ -191,11 +219,13 @@ ram_catalog_t *create_dir_entry_in_catalog(const char *path, size_t hash) {
       return NULL;
    }
    ram_file_t *file = g_files + g_free_stack[--g_free_top];
+   file->first_chunk = NULL;
    file->chunks = NULL;
    file->chunks_count = 0;
    file->chunks_capacity = 0;
    file->size = 0;
    file->is_dir = 1;
+   file->is_inlined = 0;
    size_t i = hash & g_table_mask;
    while (g_table[i].path != NULL) {
       i = (i + 1) & g_table_mask;
@@ -417,11 +447,17 @@ int resolve_path(const char *src, char *dst, size_t dst_size) {
 }
 
 /* =========================================================================
- * Opérations de stockage paginé (Chunked Storage)
+ * Opérations de stockage paginé et inliné (4-Tier Chunked & SFO Storage)
  * ========================================================================= */
 
 unsigned char *rfs_file_get_chunk(const ram_file_t *file, size_t idx) {
-   if (!file || idx >= file->chunks_count) {
+   if (!file) {
+      return NULL;
+   }
+   if (file->is_inlined) {
+      return (idx == 0) ? (unsigned char *)file->inline_data : NULL;
+   }
+   if (idx >= file->chunks_count) {
       return NULL;
    }
    if (idx == 0) {
@@ -448,6 +484,7 @@ void rfs_file_free_storage(ram_file_t *file) {
    file->chunks_count = 0;
    file->chunks_capacity = 0;
    file->size = 0;
+   file->is_inlined = 1;
 }
 
 static int rfs_file_ensure_capacity(ram_file_t *file, size_t needed_size) {
@@ -518,6 +555,10 @@ size_t rfs_file_read_bytes(const ram_file_t *file, size_t offset, void *buf, siz
    }
    size_t available = file->size - offset;
    size_t to_read = count < available ? count : available;
+   if (file->is_inlined) {
+      memcpy(buf, file->inline_data + offset, to_read);
+      return to_read;
+   }
    size_t read_bytes = 0;
    char *dst = (char *)buf;
    while (read_bytes < to_read) {
@@ -544,7 +585,28 @@ int rfs_file_write_bytes(ram_file_t *file, size_t offset, const void *buf, size_
       return 0;
    }
    size_t target_end = offset + count;
-   if (target_end > file->size) {
+   if (file->is_inlined && target_end <= RAMFS_INLINE_CAPACITY) {
+      if (offset > file->size) {
+         memset(file->inline_data + file->size, 0, offset - file->size);
+      }
+      memcpy(file->inline_data + offset, buf, count);
+      if (target_end > file->size) {
+         file->size = target_end;
+      }
+      return 0;
+   }
+   if (file->is_inlined) {
+      if (rfs_file_ensure_capacity(file, target_end) != 0) {
+         return -1;
+      }
+      file->is_inlined = 0;
+      if (file->size > 0) {
+         memcpy(file->first_chunk, file->inline_data, file->size);
+      }
+      if (offset > file->size) {
+         rfs_file_zero_range(file, file->size, offset);
+      }
+   } else if (target_end > file->size) {
       if (rfs_file_ensure_capacity(file, target_end) != 0) {
          return -1;
       }
@@ -580,6 +642,25 @@ int rfs_file_truncate(ram_file_t *file, size_t new_len) {
    if (new_len == file->size) {
       return 0;
    }
+   if (file->is_inlined) {
+      if (new_len <= RAMFS_INLINE_CAPACITY) {
+         if (new_len > file->size) {
+            memset(file->inline_data + file->size, 0, new_len - file->size);
+         }
+         file->size = new_len;
+         return 0;
+      }
+      if (rfs_file_ensure_capacity(file, new_len) != 0) {
+         return -1;
+      }
+      file->is_inlined = 0;
+      if (file->size > 0) {
+         memcpy(file->first_chunk, file->inline_data, file->size);
+      }
+      rfs_file_zero_range(file, file->size, new_len);
+      file->size = new_len;
+      return 0;
+   }
    if (new_len > file->size) {
       if (rfs_file_ensure_capacity(file, new_len) != 0) {
          return -1;
@@ -612,6 +693,9 @@ int rfs_file_get_byte(const ram_file_t *file, size_t offset) {
    if (!file || offset >= file->size) {
       return -1;
    }
+   if (file->is_inlined) {
+      return (int)file->inline_data[offset];
+   }
    size_t chunk_idx = offset >> RAMFS_CHUNK_SHIFT;
    size_t chunk_off = offset & RAMFS_CHUNK_MASK;
    const unsigned char *chunk = rfs_file_get_chunk(file, chunk_idx);
@@ -621,6 +705,10 @@ int rfs_file_get_byte(const ram_file_t *file, size_t offset) {
 int rfs_file_put_byte(ram_file_t *file, size_t offset, unsigned char c) {
    if (!file || offset >= file->size) {
       return -1;
+   }
+   if (file->is_inlined) {
+      file->inline_data[offset] = c;
+      return 0;
    }
    size_t chunk_idx = offset >> RAMFS_CHUNK_SHIFT;
    size_t chunk_off = offset & RAMFS_CHUNK_MASK;
@@ -693,6 +781,10 @@ int rfs_init(unsigned files_count, unsigned access_count) {
       g_free_stack[i] = files_count - 1 - i;
    }
    g_free_top = files_count;
+   /* Préchauffage du pool (Axe 4) : 1 slab de 16 blocs de 64 Ko (1 Mo) */
+   if (files_count > 0) {
+      allocate_slab();
+   }
    return 0;
 }
 
@@ -723,10 +815,16 @@ void rfs_destroy(void) {
       }
       free(g_access_table);
    }
-   if (g_chunk_pool) {
-      for (size_t i = 0; i < g_chunk_pool_top; i++) {
-         free(g_chunk_pool[i]);
+   if (g_slab_list) {
+      for (size_t i = 0; i < g_slab_count; i++) {
+         free(g_slab_list[i]);
       }
+      free(g_slab_list);
+      g_slab_list = NULL;
+      g_slab_count = 0;
+      g_slab_capacity = 0;
+   }
+   if (g_chunk_pool) {
       free(g_chunk_pool);
       g_chunk_pool = NULL;
       g_chunk_pool_top = 0;
