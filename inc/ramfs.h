@@ -43,6 +43,13 @@ RAMFS_API int rfs_init(unsigned file_count, unsigned access_count);
 RAMFS_API void rfs_destroy(void);
 
 /**
+ * Retourne la version de la bibliothèque fixée par le tag git le plus récent.
+ *
+ * @return chaîne de caractères constante contenant le numéro de version (ex: "v1.0.0").
+ */
+RAMFS_API const char *rfs_version(void);
+
+/**
  * Récupère les métriques d'utilisation et de crête de la bibliothèque.
  *
  * @param stats pointeur vers la structure recevant les métriques

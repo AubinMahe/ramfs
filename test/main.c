@@ -653,7 +653,9 @@ static void test_stats(void) {
    CHECK(rfs_close(fd3) == 0);
    CHECK(rfs_close(fd4) == 0);
 
-   /* 7. Affichage synthétique sans crash */
+   /* 7. Affichage synthétique et version */
+   CHECK(rfs_version() != NULL);
+   CHECK(strlen(rfs_version()) > 0);
    rfs_dump_stats(NULL);
 
    rfs_destroy();

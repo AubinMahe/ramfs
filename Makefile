@@ -19,8 +19,9 @@ BENCH       := test/benchmark.c
 BENCH_RAM   := test/benchmark-ramfs-only.c
 EXTRA       ?=
 MEASURES    ?=
+GIT_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "v1.0.0")
 WARN        := -std=c11 -Wall -Wextra -pedantic -Wformat=2 -Wformat-security -Wstrict-overflow -Wno-unused-result -Werror $(EXTRA)
-CFLAGS      := $(WARN) $(BUILD_FLAGS) -I inc -D_POSIX_C_SOURCE=200809L $(if $(MEASURES),-DMEASURES=$(MEASURES))
+CFLAGS      := $(WARN) $(BUILD_FLAGS) -I inc -D_POSIX_C_SOURCE=200809L -DRAMFS_VERSION=\"$(GIT_VERSION)\" $(if $(MEASURES),-DMEASURES=$(MEASURES))
 CPPFLAGS    := -DBUILDING_RAMFS_DLL
 BUILD_LINUX := build_linux$(SUFFIX)
 BUILD_WIN   := build_win$(SUFFIX)
@@ -78,7 +79,7 @@ test_win: $(BUILD_WIN)/test_ramfs.exe
 
 test: test_linux test_win
 
-QA_CFLAGS := $(WARN) -I inc -D_POSIX_C_SOURCE=200809L
+QA_CFLAGS := $(WARN) -I inc -D_POSIX_C_SOURCE=200809L -DRAMFS_VERSION=\"$(GIT_VERSION)\"
 QA_LDLIBS := -lz
 
 $(B_ASAN)/test_ramfs: $(SRC_LIB) $(TESTS) $(HDR)

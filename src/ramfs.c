@@ -985,16 +985,22 @@ int rfs_get_stats(rfs_stats_t *stats) {
    return 0;
 }
 
+#ifndef RAMFS_VERSION
+#define RAMFS_VERSION "unknown"
+#endif
+
+const char *rfs_version(void) { return RAMFS_VERSION; }
+
 void rfs_dump_stats(FILE *stream) {
    FILE *out = stream ? stream : stderr;
    rfs_stats_t st;
    if (rfs_get_stats(&st) != 0) {
-      fprintf(out, "ramfile: non initialisé\n");
+      fprintf(out, "ramfile: non initialisé (version %s)\n", rfs_version());
       return;
    }
    double files_pct = st.files_capacity ? ((double)st.peak_files * 100.0 / (double)st.files_capacity) : 0.0;
    double access_pct = st.access_capacity ? ((double)st.peak_access * 100.0 / (double)st.access_capacity) : 0.0;
-   fprintf(out, "=== Statistiques ramfs ===\n");
+   fprintf(out, "=== Statistiques ramfs (%s) ===\n", rfs_version());
    fprintf(out, "Fichiers : actuel %u, pic %u / %u (%.1f%%)\n", st.files_used, st.peak_files, st.files_capacity, files_pct);
    fprintf(out, "Accès    : actuel %u, pic %u / %u (%.1f%%)\n", st.access_used, st.peak_access, st.access_capacity, access_pct);
    fprintf(out, "============================\n");
