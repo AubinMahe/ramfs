@@ -85,6 +85,7 @@ jobs:
           sudo apt-get install -y \
             build-essential \
             zlib1g-dev \
+            libz-mingw-w64-dev \
             valgrind \
             electric-fence \
             pmccabe \
@@ -99,7 +100,7 @@ jobs:
 
       - name: Compile Windows MinGW targets & Wine tests
         run: |
-          make windows
+          make windows EXTRA="-Wno-format-truncation"
           make test_win
 
       - name: Check code complexity metrics

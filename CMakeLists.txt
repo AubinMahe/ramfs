@@ -1,10 +1,22 @@
 cmake_minimum_required(VERSION 3.16)
 
-# Detect project version from git or fallback
-set(DEFAULT_VERSION "2.1.1")
+# Extract version dynamically from Git tags (same mechanism as Makefile)
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
   find_package(Git QUIET)
   if(GIT_FOUND)
+    # Numerical version for CMake project() (e.g. v2.1.1 -> 2.1.1)
+    execute_process(
+      COMMAND ${GIT_EXECUTABLE} describe --tags --abbrev=0
+      WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
+      OUTPUT_VARIABLE RAMFS_GIT_TAG
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET
+    )
+    if(RAMFS_GIT_TAG MATCHES "^v?([0-9]+(\\.[0-9]+)*)")
+      set(RAMFS_PARSED_VERSION "${CMAKE_MATCH_1}")
+    endif()
+
+    # Detailed version string for binary metadata (e.g. v2.1.1 or v2.1.1-1-gfeaf474-dirty)
     execute_process(
       COMMAND ${GIT_EXECUTABLE} describe --tags --always --dirty
       WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}
@@ -14,12 +26,17 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/.git")
     )
   endif()
 endif()
+
+# Fallback only when building outside of a Git tree (e.g. release tarball without .git)
+if(NOT RAMFS_PARSED_VERSION)
+  set(RAMFS_PARSED_VERSION "1.0.0")
+endif()
 if(NOT RAMFS_GIT_VERSION)
-  set(RAMFS_GIT_VERSION "v${DEFAULT_VERSION}")
+  set(RAMFS_GIT_VERSION "v${RAMFS_PARSED_VERSION}")
 endif()
 
 project(ramfs
-  VERSION 2.1.1
+  VERSION ${RAMFS_PARSED_VERSION}
   DESCRIPTION "High-Performance In-Memory Virtual Filesystem (VFS) in C11"
   HOMEPAGE_URL "https://github.com/AubinMahe/ramfs"
   LANGUAGES C
@@ -64,6 +81,10 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     -Wstrict-overflow
     -Wno-unused-result
   )
+endif()
+
+if(CMAKE_C_COMPILER_ID MATCHES "Clang")
+  target_compile_options(ramfs_common_options INTERFACE -msse4.2 -Wno-unknown-pragmas)
 endif()
 
 # Sanitizers and coverage
