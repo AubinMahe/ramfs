@@ -1,0 +1,19 @@
+{
+   "files.watcherExclude": {
+      "**/build_*/**": true,
+      "**/.git/**": true
+   },
+   "search.exclude": {
+      "**/build_*/**": true
+   },
+   "C_Cpp.files.exclude": {
+      "**/build_*/**": true
+   },
+   "C_Cpp.intelliSenseEngine": "disabled",
+   "clangd.arguments": [
+      "--compile-commands-dir=${workspaceFolder}",
+      "--background-index",
+      "--clang-tidy",
+      "-j=4"
+   ]
+}

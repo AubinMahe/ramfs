@@ -35,12 +35,16 @@ ALL_DIRS    := build_linux build_linux_debug build_win build_win_debug $(B_ASAN)
 PERF_BIN    := $(BUILD_LINUX)/perf_benchmark
 PERF_WIN    := $(BUILD_WIN)/perf_benchmark.exe
 
-.PHONY: all linux windows win clean help test test_linux test_mt test_win bench check asan tsan valgrind efence perf callgrind format-sources complexity metrics coverage lcov gcov
+.PHONY: all linux windows win clean help test test_linux test_mt test_win bench check asan tsan valgrind efence perf callgrind format-sources complexity metrics coverage lcov gcov compile_commands.json bear
 
 all: linux windows
 
 clean:
 	rm -rf $(ALL_DIRS)
+
+compile_commands.json bear:
+	@which bear >/dev/null 2>&1 || (echo "Error: bear is not installed (sudo apt install bear)" && exit 1)
+	bear -- $(MAKE) clean linux
 
 format-sources:
 	clang-format -i --verbose inc/*.h src/*.c src/*.h test/*.c

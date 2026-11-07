@@ -1,2 +1,4 @@
 build_*
 commit-comment.md
+compile_commands.json
+
