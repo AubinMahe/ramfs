@@ -1,0 +1,106 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+permissions:
+  contents: read
+
+jobs:
+  cmake-build-and-test:
+    name: CMake (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: "Linux GCC (Release)"
+            os: ubuntu-latest
+            cc: gcc
+            build_type: Release
+            cmake_args: "-DRAMFS_BUILD_BENCHMARK=ON"
+          - name: "Linux Clang (Release)"
+            os: ubuntu-latest
+            cc: clang
+            build_type: Release
+            cmake_args: "-DRAMFS_BUILD_BENCHMARK=ON"
+          - name: "Linux GCC (ASan + UBSan)"
+            os: ubuntu-latest
+            cc: gcc
+            build_type: Debug
+            cmake_args: "-DRAMFS_ENABLE_ASAN=ON"
+          - name: "Linux GCC (TSan)"
+            os: ubuntu-latest
+            cc: gcc
+            build_type: Debug
+            cmake_args: "-DRAMFS_ENABLE_TSAN=ON"
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y zlib1g-dev
+
+      - name: Configure CMake
+        env:
+          CC: ${{ matrix.cc }}
+        run: |
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_EXPORT_COMPILE_COMMANDS=ON \
+            -DRAMFS_BUILD_TESTS=ON \
+            ${{ matrix.cmake_args }}
+
+      - name: Build targets
+        run: cmake --build build --config ${{ matrix.build_type }} --parallel $(nproc)
+
+      - name: Run CTest test suite
+        run: ctest --test-dir build --output-on-failure --verbose
+
+      - name: Run benchmark (Release builds only)
+        if: matrix.build_type == 'Release'
+        run: ./build/perf_benchmark
+
+  make-qa-check:
+    name: GNU Make QA (ASan, TSan, Valgrind, EFence)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            zlib1g-dev \
+            valgrind \
+            electric-fence \
+            pmccabe \
+            gcc-mingw-w64-x86-64 \
+            wine64
+
+      - name: Compile Linux targets
+        run: make linux
+
+      - name: Run QA check suite
+        run: make check
+
+      - name: Compile Windows MinGW targets & Wine tests
+        run: |
+          make windows
+          make test_win
+
+      - name: Check code complexity metrics
+        run: make metrics

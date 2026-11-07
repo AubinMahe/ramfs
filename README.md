@@ -1,5 +1,6 @@
 # `ramfs`: High-Performance In-Memory Virtual Filesystem (VFS) in C11
 
+[![CI](https://github.com/AubinMahe/ramfs/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/AubinMahe/ramfs/actions/workflows/ci.yml)
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE.txt)
 [![C Standard](https://img.shields.io/badge/Standard-C11-orange.svg)](#)
 [![Platforms](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows%20(MinGW)-lightgrey.svg)](#)
@@ -162,6 +163,26 @@ FILE *disk = rfs_fopen("config.json", "r");
 | `make coverage` | Generates HTML code coverage report via `lcov` / `genhtml` |
 | `make format-sources` | Automatically formats all source code according to `.clang-format` |
 | `make clean` | Removes all build artifacts |
+
+### CMake & CTest Build
+
+```bash
+# Configure and build
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+
+# Run test suite with CTest
+ctest --test-dir build --output-on-failure
+
+# Optional: Run performance benchmark
+./build/perf_benchmark
+
+# Integrate as a dependency in your CMake project (FetchContent):
+# FetchContent_Declare(ramfs GIT_REPOSITORY https://github.com/AubinMahe/ramfs.git)
+# FetchContent_MakeAvailable(ramfs)
+# target_link_libraries(my_app PRIVATE ramfs::ramfs)      # Single-thread
+# target_link_libraries(my_app PRIVATE ramfs::ramfs_mt)   # Multi-thread
+```
 
 ---
 

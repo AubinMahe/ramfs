@@ -20,9 +20,11 @@ This document outlines potential future enhancements, optimizations, and feature
   - Add optional automatic eviction of unmodified clean chunks or temporary files when memory pressure occurs.
 
 ## 3. Integration & Ecosystem
-- [ ] **CMake & Meson Build Configurations**:
-  - Provide modern `CMakeLists.txt` and `meson.build` alongside the standard `Makefile` for streamlined integration with vcpkg, Conan, and CMake-based parent projects.
+- [x] **CMake & CTest Build Configuration**:
+  - Modern `CMakeLists.txt` supporting `FetchContent`, `find_package()`, exported targets (`ramfs::ramfs`, `ramfs::ramfs_mt`), and CTest suite alongside `Makefile`.
+- [ ] **Meson Build Configuration**:
+  - Add optional `meson.build` configuration.
 - [ ] **FUSE Daemon Wrapper (`ramfs-fuse`)**:
   - Create a lightweight FUSE (Filesystem in Userspace) frontend enabling external non-C applications or CLI tools to mount `ramfs` directly into the OS namespace.
-- [ ] **CI/CD Automation (GitHub Actions)**:
-  - Automated matrix workflow testing GCC/Clang on Linux, MinGW-w64 on Windows, macOS, AddressSanitizer, UndefinedBehaviorSanitizer, and ThreadSanitizer on every push and pull request.
+- [x] **CI/CD Automation (GitHub Actions)**:
+  - Automated matrix workflow testing GCC/Clang on Linux, MinGW-w64 on Windows, AddressSanitizer, UndefinedBehaviorSanitizer, ThreadSanitizer, Valgrind, and Electric Fence on every push and pull request.
