@@ -1,5 +1,12 @@
 #pragma once
 
+#include <dirent.h>
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+
 #if defined(_WIN32) || defined(__CYGWIN__)
 #ifdef BUILDING_RAMFS_DLL
 #define RAMFS_API __declspec(dllexport)
@@ -10,24 +17,45 @@
 #define RAMFS_API __attribute__((visibility("default")))
 #endif
 
-#include <dirent.h>
-#include <stdarg.h>
-#include <stddef.h>
-#include <stdio.h>
-#include <sys/stat.h>
-#include <sys/types.h>
+#ifndef DT_UNKNOWN
+#define DT_UNKNOWN 0
+#endif
+#ifndef DT_DIR
+#define DT_DIR 4
+#endif
+#ifndef DT_REG
+#define DT_REG 8
+#endif
 
-typedef int rfs_handle_t;
 #define RFS_INVALID_HANDLE (-1)
 
+typedef int rfs_handle_t;
+
 typedef struct {
-   unsigned files_used;      /* Current number of active files */
-   unsigned peak_files;      /* Peak concurrent files */
-   unsigned files_capacity;  /* Capacity configured or allocated */
-   unsigned access_used;     /* Current number of open descriptors */
-   unsigned peak_access;     /* Peak concurrent descriptors */
-   unsigned access_capacity; /* Capacity configured or allocated */
+   unsigned files_used;       /* Current number of active files and directories */
+   unsigned regular_files;    /* Current number of active regular files */
+   unsigned directories;      /* Current number of active directories */
+   unsigned peak_files;       /* Peak concurrent files and directories */
+   unsigned files_capacity;   /* Capacity configured or allocated */
+   unsigned access_used;      /* Current number of open descriptors */
+   unsigned peak_access;      /* Peak concurrent descriptors */
+   unsigned access_capacity;  /* Capacity configured or allocated */
+   size_t   data_bytes;       /* Total logical payload bytes stored */
+   size_t   memory_allocated; /* Total RAM allocated for storage and metadata */
+   unsigned inlined_files;    /* Small files inlined (<= 1 KB, 0 chunks) */
+   unsigned chunked_files;    /* Files using chunked storage */
+   unsigned chunks_used;      /* Active 64 KB chunks in use by files */
+   unsigned chunks_pooled;    /* Free 64 KB chunks pooled for reuse */
+   unsigned slabs_count;      /* 1 MB Slabs allocated */
 } rfs_stats_t;
+
+struct rfs_dirent {
+   ino_t d_ino;
+   unsigned char d_type;
+   char d_name[256];
+};
+
+typedef struct rfs_dir rfs_dir_t;
 
 /**
  * Initializes ramfs internal structures.
@@ -105,32 +133,12 @@ RAMFS_API int rfs_dup(rfs_handle_t oldfd);
 RAMFS_API int rfs_dup2(rfs_handle_t oldfd, rfs_handle_t newfd);
 RAMFS_API int rfs_ftruncate(rfs_handle_t fd, off_t length);
 RAMFS_API int rfs_truncate(const char *pathname, off_t length);
-
-#ifndef DT_UNKNOWN
-#define DT_UNKNOWN 0
-#endif
-#ifndef DT_DIR
-#define DT_DIR 4
-#endif
-#ifndef DT_REG
-#define DT_REG 8
-#endif
-
-struct rfs_dirent {
-   ino_t d_ino;
-   unsigned char d_type;
-   char d_name[256];
-};
-
-typedef struct rfs_dir rfs_dir_t;
-
 RAMFS_API rfs_dir_t *rfs_opendir(const char *name);
 RAMFS_API struct rfs_dirent *rfs_readdir(rfs_dir_t *dirp);
 RAMFS_API int rfs_closedir(rfs_dir_t *dirp);
 RAMFS_API void rfs_rewinddir(rfs_dir_t *dirp);
 RAMFS_API long rfs_telldir(rfs_dir_t *dirp);
 RAMFS_API void rfs_seekdir(rfs_dir_t *dirp, long loc);
-
 RAMFS_API int rfs_chdir(const char *path);
 RAMFS_API char *rfs_getcwd(char *buf, size_t size);
 

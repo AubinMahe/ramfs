@@ -632,16 +632,28 @@ static void test_stats(void) {
    CHECK(rfs_get_stats(&st) == 0);
    CHECK(st.files_used == 0 && st.peak_files == 0 && st.files_capacity == 10);
    CHECK(st.access_used == 0 && st.peak_access == 0 && st.access_capacity == 5);
+   CHECK(st.regular_files == 0 && st.directories == 0);
+   CHECK(st.data_bytes == 0 && st.inlined_files == 0 && st.chunked_files == 0);
+   CHECK(st.chunks_used == 0 && st.memory_allocated > 0);
 
    /* 3. Création et ouverture de 3 fichiers */
    int fd1 = rfs_open("a.dat", O_CREAT | O_RDWR, 0644);
    int fd2 = rfs_open("b.dat", O_CREAT | O_RDWR, 0644);
    int fd3 = rfs_open("c.dat", O_CREAT | O_RDWR, 0644);
    CHECK(fd1 >= 0 && fd2 >= 0 && fd3 >= 0);
+   CHECK(rfs_write(fd1, "hello", 5) == 5);
 
    CHECK(rfs_get_stats(&st) == 0);
    CHECK(st.files_used == 3 && st.peak_files == 3);
+   CHECK(st.regular_files == 3 && st.directories == 0);
+   CHECK(st.inlined_files == 3 && st.chunked_files == 0);
+   CHECK(st.data_bytes == 5);
    CHECK(st.access_used == 3 && st.peak_access == 3);
+
+   /* Création d'un répertoire */
+   CHECK(rfs_mkdir("mydir", 0755) == 0);
+   CHECK(rfs_get_stats(&st) == 0);
+   CHECK(st.files_used == 4 && st.directories == 1 && st.regular_files == 3);
 
    /* 4. Fermeture de descripteurs : l'actuel baisse, le pic reste */
    CHECK(rfs_close(fd1) == 0);
@@ -653,14 +665,26 @@ static void test_stats(void) {
    /* 5. Suppression de fichier : l'actuel baisse, le pic reste */
    CHECK(rfs_unlink("a.dat") == 0);
    CHECK(rfs_get_stats(&st) == 0);
-   CHECK(st.files_used == 2);
-   CHECK(st.peak_files == 3);
+   CHECK(st.files_used == 3);
+   CHECK(st.regular_files == 2);
+   CHECK(st.data_bytes == 0); /* 'hello' était dans a.dat */
+   CHECK(st.peak_files == 4);
 
-   /* 6. Ouverture d'un nouveau fichier */
+   /* 6. Ouverture et écriture d'un gros fichier chunked (> 1 KB) */
    int fd4 = rfs_open("d.dat", O_CREAT | O_RDWR, 0644);
    CHECK(fd4 >= 0);
+   char big_buf[2048];
+   memset(big_buf, 0xAA, sizeof(big_buf));
+   CHECK(rfs_write(fd4, big_buf, sizeof(big_buf)) == sizeof(big_buf));
+
    CHECK(rfs_get_stats(&st) == 0);
-   CHECK(st.files_used == 3 && st.peak_files == 3);
+   CHECK(st.files_used == 4 && st.peak_files == 4);
+   CHECK(st.regular_files == 3 && st.directories == 1);
+   CHECK(st.inlined_files == 2 && st.chunked_files == 1);
+   CHECK(st.chunks_used == 1);
+   CHECK(st.slabs_count >= 1);
+   CHECK(st.data_bytes == sizeof(big_buf));
+   CHECK(st.memory_allocated >= 1024 * 1024);
    CHECK(st.access_used == 2 && st.peak_access == 3);
 
    CHECK(rfs_close(fd3) == 0);

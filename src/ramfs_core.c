@@ -16,6 +16,10 @@
 #include <smmintrin.h>
 #endif
 
+#ifndef RAMFS_VERSION
+#define RAMFS_VERSION "unknown"
+#endif
+
 /* =========================================================================
  * Core global state variables
  * ========================================================================= */
@@ -972,6 +976,30 @@ void rfs_destroy(void) {
    memset(g_depth_counts, 0, sizeof(g_depth_counts));
 }
 
+static void collect_catalog_stats(rfs_stats_t *stats, size_t *metadata_bytes) {
+   for (size_t i = 0; i <= g_table_mask; i++) {
+      if (g_table[i].path != NULL && g_table[i].file != NULL) {
+         *metadata_bytes += strlen(g_table[i].path) + 1;
+         ram_file_t *f = g_table[i].file;
+         rfs_file_rdlock(f);
+         if (f->is_dir) {
+            stats->directories++;
+         } else {
+            stats->regular_files++;
+            stats->data_bytes += f->size;
+            if (f->is_inlined) {
+               stats->inlined_files++;
+            } else {
+               stats->chunked_files++;
+               stats->chunks_used += (unsigned)f->chunks_count;
+               *metadata_bytes += f->chunks_capacity * sizeof(unsigned char *);
+            }
+         }
+         rfs_file_unlock(f);
+      }
+   }
+}
+
 int rfs_get_stats(rfs_stats_t *stats) {
    if (!stats) {
       errno = EINVAL;
@@ -983,20 +1011,42 @@ int rfs_get_stats(rfs_stats_t *stats) {
    }
    rfs_catalog_rdlock();
    rfs_access_lock();
+   RFS_MUTEX_LOCK(&g_slab_mutex);
+
    stats->files_used = g_files_used;
    stats->peak_files = g_peak_files;
    stats->files_capacity = g_files_capacity;
    stats->access_used = g_access_used;
    stats->peak_access = g_peak_access;
    stats->access_capacity = g_access_capacity;
+
+   stats->regular_files = 0;
+   stats->directories = 0;
+   stats->data_bytes = 0;
+   stats->inlined_files = 0;
+   stats->chunked_files = 0;
+   stats->chunks_used = 0;
+   stats->chunks_pooled = (unsigned)g_chunk_pool_top;
+   stats->slabs_count = (unsigned)g_slab_count;
+
+   size_t metadata_bytes = 0;
+   metadata_bytes += (g_table_mask + 1) * sizeof(ram_catalog_t);
+   metadata_bytes += g_files_capacity * sizeof(ram_file_t);
+   metadata_bytes += g_files_capacity * sizeof(unsigned);
+   metadata_bytes += g_access_capacity * sizeof(ram_file_access_t);
+   metadata_bytes += g_slab_capacity * sizeof(unsigned char *);
+   metadata_bytes += g_chunk_pool_capacity * sizeof(unsigned char *);
+
+   collect_catalog_stats(stats, &metadata_bytes);
+
+   size_t slabs_bytes = g_slab_count * (size_t)RAMFS_SLAB_CHUNKS * (size_t)RAMFS_CHUNK_SIZE;
+   stats->memory_allocated = slabs_bytes + metadata_bytes;
+
+   RFS_MUTEX_UNLOCK(&g_slab_mutex);
    rfs_access_unlock();
    rfs_catalog_unlock();
    return 0;
 }
-
-#ifndef RAMFS_VERSION
-#define RAMFS_VERSION "unknown"
-#endif
 
 const char *rfs_version(void) { return RAMFS_VERSION; }
 
@@ -1009,8 +1059,17 @@ void rfs_dump_stats(FILE *stream) {
    }
    double files_pct = st.files_capacity ? ((double)st.peak_files * 100.0 / (double)st.files_capacity) : 0.0;
    double access_pct = st.access_capacity ? ((double)st.peak_access * 100.0 / (double)st.access_capacity) : 0.0;
+   double mem_mb = (double)st.memory_allocated / (1024.0 * 1024.0);
+   double data_mb = (double)st.data_bytes / (1024.0 * 1024.0);
+   double efficiency = st.memory_allocated ? ((double)st.data_bytes * 100.0 / (double)st.memory_allocated) : 0.0;
    fprintf(out, "=== ramfs statistics (%s) ===\n", rfs_version());
-   fprintf(out, "Files  : current %u, peak %u / %u (%.1f%%)\n", st.files_used, st.peak_files, st.files_capacity, files_pct);
-   fprintf(out, "Access : current %u, peak %u / %u (%.1f%%)\n", st.access_used, st.peak_access, st.access_capacity, access_pct);
+   fprintf(out, "Files       : total %u (regular %u, dirs %u), peak %u / %u (%.1f%%)\n",
+           st.files_used, st.regular_files, st.directories, st.peak_files, st.files_capacity, files_pct);
+   fprintf(out, "Descriptors : current %u, peak %u / %u (%.1f%%)\n",
+           st.access_used, st.peak_access, st.access_capacity, access_pct);
+   fprintf(out, "Storage     : %.2f MB payload (inlined %u, chunked %u)\n",
+           data_mb, st.inlined_files, st.chunked_files);
+   fprintf(out, "Memory      : %.2f MB allocated (slabs %u, chunks %u, pooled %u, eff %.1f%%)\n",
+           mem_mb, st.slabs_count, st.chunks_used, st.chunks_pooled, efficiency);
    fprintf(out, "============================\n");
 }

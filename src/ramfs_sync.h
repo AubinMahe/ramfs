@@ -64,12 +64,8 @@ typedef struct {
 #define RFS_MUTEX_LOCK(m) ((void)(m))
 #define RFS_MUTEX_UNLOCK(m) ((void)(m))
 
-static inline rfs_rwlock_t *rfs_rwlock_create(void) {
-   return NULL;
-}
+static inline rfs_rwlock_t *rfs_rwlock_create(void) { return NULL; }
 
-static inline void rfs_rwlock_free(rfs_rwlock_t *rw) {
-   (void)rw;
-}
+static inline void rfs_rwlock_free(rfs_rwlock_t *rw) { (void)rw; }
 
 #endif
